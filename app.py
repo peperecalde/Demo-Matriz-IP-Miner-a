@@ -17,6 +17,28 @@ DATA = Path(__file__).with_name("matriz_sipm_v2_demo.csv")
 @st.cache_data
 def load_data():
     df = pd.read_csv(DATA)
+
+    # Normalización robusta de nombres de eslabonamiento.
+    # Esto evita inconsistencias si en el CSV queda algún valor antiguo
+    # o con diferencias de mayúsculas/minúsculas.
+    df["tipo_eslabonamiento"] = (
+        df["tipo_eslabonamiento"]
+        .astype(str)
+        .str.strip()
+        .replace({
+            "Hacia atrás": "Aguas arriba",
+            "Hacia atras": "Aguas arriba",
+            "hacia atrás": "Aguas arriba",
+            "hacia atras": "Aguas arriba",
+            "Aguas Arriba": "Aguas arriba",
+            "aguas arriba": "Aguas arriba",
+            "Hacia adelante": "Aguas abajo",
+            "hacia adelante": "Aguas abajo",
+            "Aguas Abajo": "Aguas abajo",
+            "aguas abajo": "Aguas abajo"
+        })
+    )
+
     df["captura_local_usd_demo"] = df["demanda_anual_usd_demo"] * df["participacion_catamarca_pct_demo"] / 100
     df["gasto_fuera_catamarca_usd_demo"] = df["demanda_anual_usd_demo"] - df["captura_local_usd_demo"]
     df["puntaje_oportunidad_demo"] = (
@@ -473,7 +495,12 @@ with st.sidebar:
     st.divider()
     st.markdown("### Filtros")
     minerals = st.multiselect("Mineral", sorted(df["mineral"].unique()), default=sorted(df["mineral"].unique()))
-    linkages = st.multiselect("Eslabonamiento", sorted(df["tipo_eslabonamiento"].unique()), default=sorted(df["tipo_eslabonamiento"].unique()))
+    linkage_options = ["Aguas arriba", "Aguas abajo"]
+    linkages = st.multiselect(
+        "Eslabonamiento",
+        linkage_options,
+        default=linkage_options
+    )
     stages = st.multiselect("Etapa del proyecto", sorted(df["etapa_proyecto"].unique()), default=sorted(df["etapa_proyecto"].unique()))
     territories = st.multiselect("Territorio potencial", sorted(df["territorio_potencial"].unique()), default=sorted(df["territorio_potencial"].unique()))
     st.divider()
@@ -536,7 +563,7 @@ with tabs[0]:
 El SIPM propone transformar información dispersa sobre compras, proveedores, capacidades productivas y cadenas de valor en una herramienta permanente de inteligencia económica. Su objetivo es mostrar <b>qué actividades moviliza la minería, cuánto valor puede quedar en Catamarca y dónde existen brechas concretas para desarrollar empresas, empleo, formación e inversión.</b>
 </div>
 <div class="intro-copy">
-La necesidad surge porque producir más minerales no garantiza, por sí solo, mayor desarrollo provincial. Para convertir la expansión minera en una política de desarrollo productivo, Catamarca necesita identificar sus <b>eslabonamientos hacia atrás y hacia adelante</b>, medir el contenido local, anticipar demanda y priorizar las oportunidades con mayor impacto económico y territorial.
+La necesidad surge porque producir más minerales no garantiza, por sí solo, mayor desarrollo provincial. Para convertir la expansión minera en una política de desarrollo productivo, Catamarca necesita identificar sus <b>eslabonamientos aguas arriba y aguas abajo</b>, medir el contenido local, anticipar demanda y priorizar las oportunidades con mayor impacto económico y territorial.
 </div>
 """, unsafe_allow_html=True)
     a,b,c=st.columns(3)
@@ -586,10 +613,10 @@ with tabs[1]:
     st.markdown('<div class="sipm-note"><b>Cómo leerlo:</b> cuanto mayor es el bloque, mayor es la demanda asociada. El tono indica cuánto de esa actividad se captura localmente en la simulación.</div>',unsafe_allow_html=True)
 
 # ------------------------------------------------
-# HACIA ATRAS
+# AGUAS ARRIBA
 # ------------------------------------------------
 with tabs[2]:
-    st.subheader("Eslabonamientos hacia atrás")
+    st.subheader("Eslabonamientos aguas arriba")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> cómo la actividad minera genera demanda sobre construcción, energía, logística, metalmecánica, tecnología, ambiente, servicios y otros sectores. El ancho de cada flujo representa el peso económico de esa relación. Esta vista permite entender que el impacto minero comienza mucho antes de extraer el mineral.</div>', unsafe_allow_html=True)
 
     back=f[f["tipo_eslabonamiento"]=="Aguas arriba"].copy()
@@ -690,10 +717,10 @@ with tabs[2]:
         st.caption("El diseño deliberadamente evita bajar a empresa, proveedor, contrato, precio unitario o volumen confidencial. La unidad mínima es una categoría económica suficientemente agregada para orientar política pública.")
 
 # ------------------------------------------------
-# HACIA ADELANTE
+# AGUAS ABAJO
 # ------------------------------------------------
 with tabs[3]:
-    st.subheader("Eslabonamientos hacia adelante")
+    st.subheader("Eslabonamientos aguas abajo")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> las actividades que pueden desarrollarse después de la extracción: procesamiento, refinación, manufactura, materiales avanzados, energía o reciclaje. No implica que todas sean viables, sino que permite identificar cuáles merecen estudios de factibilidad y políticas de largo plazo.</div>', unsafe_allow_html=True)
 
     fw=f[f["tipo_eslabonamiento"]=="Aguas abajo"].copy()
