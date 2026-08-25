@@ -289,7 +289,7 @@ def recommended_actions(row, target):
             ("1. Consolidar la capacidad local", "Evitar retrocesos de participación y elevar estándares de calidad, productividad y escala."),
             ("2. Exportar la capacidad", "Buscar contratos en Salta, Jujuy, La Rioja y otros distritos mineros para que el proveedor no dependa de un solo proyecto."),
         ]
-    if linkage == "Hacia adelante" or "muy alta" in complexity:
+    if linkage == "Aguas abajo" or "muy alta" in complexity:
         acts.append(("3. Evaluar inversión estratégica", "No impulsar producción local por decreto: realizar prefactibilidad técnica, escala mínima, energía, logística, tecnología y demanda regional."))
     else:
         acts.append(("3. Fijar una meta verificable", f"Construir un plan gradual desde {current:.0f}% hasta {target}% y monitorearlo por año, empresa y tipo de compra."))
@@ -298,7 +298,7 @@ def recommended_actions(row, target):
 def relevant_benchmarks(row):
     current=float(row["participacion_catamarca_pct_demo"])
     linkage=row["tipo_eslabonamiento"]
-    if linkage=="Hacia adelante":
+    if linkage=="Aguas abajo":
         return ["La Rioja","Salta","Jujuy"]
     if current < 30:
         return ["Salta","La Rioja","Jujuy"]
@@ -522,7 +522,7 @@ st.markdown(f"""
 st.caption("⚠️ Todos los indicadores cuantitativos son demostrativos. El sistema final deberá alimentarse con información validada.")
 
 tabs=st.tabs([
-    "🏠 Inicio","🌐 Ecosistema","⬅️ Hacia atrás","➡️ Hacia adelante",
+    "🏠 Inicio","🌐 Ecosistema","⬅️ Aguas arriba","➡️ Aguas abajo",
     "🎯 Oportunidades","📍 Territorio","🧪 Simulador","🎓 Políticas y talento","📋 Matriz"
 ])
 
@@ -592,9 +592,9 @@ with tabs[2]:
     st.subheader("Eslabonamientos hacia atrás")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> cómo la actividad minera genera demanda sobre construcción, energía, logística, metalmecánica, tecnología, ambiente, servicios y otros sectores. El ancho de cada flujo representa el peso económico de esa relación. Esta vista permite entender que el impacto minero comienza mucho antes de extraer el mineral.</div>', unsafe_allow_html=True)
 
-    back=f[f["tipo_eslabonamiento"]=="Hacia atrás"].copy()
+    back=f[f["tipo_eslabonamiento"]=="Aguas arriba"].copy()
     if back.empty:
-        st.info("Activá Hacia atrás en el filtro lateral.")
+        st.info("Activá Aguas arriba en el filtro lateral.")
     else:
         agg=back.groupby("macrosector",as_index=False).agg(
             demanda=("demanda_anual_usd_demo","sum"),
@@ -696,9 +696,9 @@ with tabs[3]:
     st.subheader("Eslabonamientos hacia adelante")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> las actividades que pueden desarrollarse después de la extracción: procesamiento, refinación, manufactura, materiales avanzados, energía o reciclaje. No implica que todas sean viables, sino que permite identificar cuáles merecen estudios de factibilidad y políticas de largo plazo.</div>', unsafe_allow_html=True)
 
-    fw=f[f["tipo_eslabonamiento"]=="Hacia adelante"].copy()
+    fw=f[f["tipo_eslabonamiento"]=="Aguas abajo"].copy()
     if fw.empty:
-        st.info("Activá Hacia adelante en el filtro lateral.")
+        st.info("Activá Aguas abajo en el filtro lateral.")
     else:
         mineral=st.selectbox("Nivel 1: elegí una cadena mineral",sorted(fw["mineral"].unique()),key="forward")
         chain=fw[fw["mineral"]==mineral].sort_values("id").copy()
