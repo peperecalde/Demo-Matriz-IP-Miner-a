@@ -321,6 +321,148 @@ def regional_opportunities(row):
         out.append(("NOA","Este tipo de capacidad es especialmente exportable entre provincias porque el know-how y los equipos pueden atender varios proyectos."))
     return out[:3]
 
+
+# ------------------------------------------------
+# POLÍTICA PÚBLICA Y CAPITAL HUMANO
+# ------------------------------------------------
+# Los coeficientes siguientes son supuestos DEMO para traducir empleo potencial
+# agregado en familias de perfiles. No representan vacantes reales de empresas.
+PROFILE_RULES = {
+    "Exploración y geociencias": [
+        ("Geología / Geociencias",0.45),("Ingeniería de Minas",0.20),
+        ("Técnicos de campo y muestreo",0.25),("Datos / GIS",0.10)
+    ],
+    "Laboratorios": [
+        ("Química / Procesos",0.35),("Técnicos de laboratorio",0.45),
+        ("Ambiente / Hidrología",0.10),("Datos / Calidad",0.10)
+    ],
+    "Construcción": [
+        ("Ingeniería Civil / Industrial",0.20),("Técnicos y oficios industriales",0.55),
+        ("Higiene y Seguridad",0.15),("Administración / Logística",0.10)
+    ],
+    "Agua": [
+        ("Ambiente / Hidrología",0.30),("Ingeniería Mecánica / Electromecánica",0.25),
+        ("Técnicos y oficios industriales",0.35),("Automatización / Electrónica",0.10)
+    ],
+    "Energía": [
+        ("Ingeniería Eléctrica / Electrónica",0.30),("Energías Renovables",0.15),
+        ("Técnicos y oficios industriales",0.40),("Automatización / Datos",0.15)
+    ],
+    "Logística": [
+        ("Logística / Administración",0.25),("Conductores y operadores especializados",0.55),
+        ("Mantenimiento",0.10),("Seguridad / Calidad",0.10)
+    ],
+    "Mantenimiento": [
+        ("Ingeniería Mecánica / Electromecánica",0.25),("Técnicos y oficios industriales",0.60),
+        ("Automatización / Electrónica",0.10),("Seguridad / Calidad",0.05)
+    ],
+    "Industria química": [
+        ("Química / Procesos",0.35),("Ingeniería Industrial",0.15),
+        ("Técnicos de planta",0.35),("Seguridad / Ambiente",0.15)
+    ],
+    "Tecnología": [
+        ("Software / Datos / IA",0.45),("Automatización / Electrónica",0.35),
+        ("Ciberseguridad",0.10),("Gestión tecnológica",0.10)
+    ],
+    "Ambiente": [
+        ("Ambiente / Hidrología",0.45),("Biología / Ciencias Naturales",0.20),
+        ("Técnicos ambientales",0.25),("Datos / GIS",0.10)
+    ],
+    "Metalmecánica": [
+        ("Ingeniería Mecánica / Industrial",0.20),("Técnicos y oficios industriales",0.65),
+        ("Calidad / Ensayos",0.10),("Diseño / CAD",0.05)
+    ],
+    "Equipamiento": [
+        ("Ingeniería Mecánica / Electromecánica",0.20),("Técnicos y oficios industriales",0.55),
+        ("Logística / Repuestos",0.15),("Automatización / Electrónica",0.10)
+    ],
+    "Procesamiento": [
+        ("Ingeniería de Minas / Procesos",0.25),("Química / Metalurgia",0.25),
+        ("Técnicos de planta",0.40),("Automatización / Datos",0.10)
+    ],
+    "Procesamiento mineral": [
+        ("Ingeniería de Minas / Procesos",0.25),("Química / Metalurgia",0.30),
+        ("Técnicos de planta",0.35),("Automatización / Datos",0.10)
+    ],
+    "Metalurgia": [
+        ("Química / Metalurgia",0.30),("Ingeniería Industrial / Mecánica",0.20),
+        ("Técnicos de planta",0.40),("Calidad / Ensayos",0.10)
+    ],
+    "Materiales avanzados": [
+        ("Química / Materiales",0.35),("Ingeniería / I+D",0.25),
+        ("Técnicos de laboratorio y planta",0.25),("Datos / Automatización",0.15)
+    ],
+    "Manufactura avanzada": [
+        ("Ingeniería Industrial / Mecánica",0.25),("Automatización / Electrónica",0.20),
+        ("Técnicos y oficios industriales",0.45),("Calidad / Datos",0.10)
+    ],
+    "Economía circular": [
+        ("Ambiente / Química",0.25),("Ingeniería Industrial / Procesos",0.20),
+        ("Técnicos de planta",0.45),("Logística / Calidad",0.10)
+    ]
+}
+
+DEFAULT_PROFILES = [
+    ("Técnicos y oficios especializados",0.45),
+    ("Ingenierías / Profesionales",0.25),
+    ("Administración / Logística",0.15),
+    ("Seguridad / Calidad / Ambiente",0.15)
+]
+
+def estimate_profiles(frame):
+    records=[]
+    for _,row in frame.iterrows():
+        rules=PROFILE_RULES.get(row["macrosector"],DEFAULT_PROFILES)
+        base=float(row["empleo_local_potencial_demo"])
+        for profile,share in rules:
+            records.append({
+                "perfil":profile,
+                "personas_demo":base*share,
+                "mineral":row["mineral"],
+                "territorio":row["territorio_potencial"],
+                "macrosector":row["macrosector"]
+            })
+    p=pd.DataFrame(records)
+    if p.empty:
+        return p
+    return p.groupby("perfil",as_index=False)["personas_demo"].sum().sort_values("personas_demo",ascending=False)
+
+def education_action(profile):
+    p=profile.lower()
+    if any(x in p for x in ["técnic","oficios","operadores","conductores"]):
+        return (
+            "Corto plazo",
+            "Trayectos de 3–12 meses, certificación de competencias, prácticas profesionalizantes y formación dual con empresas.",
+            "Escuelas técnicas + formación profesional + empresas"
+        )
+    if any(x in p for x in ["software","datos","automatización","electrónica","ciberseguridad"]):
+        return (
+            "Corto / medio plazo",
+            "Diplomaturas, microcredenciales y especializaciones aplicadas a minería; laboratorios de automatización, datos e instrumentación.",
+            "UNCA + institutos superiores + sector tecnológico"
+        )
+    if any(x in p for x in ["geología","ingeniería","química","metalurgia","ambiente","hidrología","biología","materiales"]):
+        return (
+            "Medio / largo plazo",
+            "Fortalecer ingreso, permanencia y egreso en carreras existentes; orientaciones mineras, becas, prácticas y proyectos de investigación aplicada.",
+            "UNCA + Gobierno + empresas mineras"
+        )
+    return (
+        "Corto / medio plazo",
+        "Formación específica por competencias y actualización de contenidos según demanda relevada por el SIPM.",
+        "Educación + Universidad + sector productivo"
+    )
+
+PUBLIC_POLICY_PILLARS = [
+    ("1. Desarrollo de proveedores","Usar la matriz para priorizar categorías con demanda alta y baja captura local; diseñar homologación, financiamiento, asociatividad y asistencia técnica."),
+    ("2. Capital humano","Traducir demanda productiva en perfiles profesionales, técnicos y oficios; alinear cupos, becas, currículas y prácticas con las brechas detectadas."),
+    ("3. Atracción de inversiones","Promover inversiones sólo donde exista demanda verificable, escala regional y una brecha productiva clara."),
+    ("4. Compras anticipadas","Solicitar planes agregados de demanda a 12–36 meses por categorías, sin exigir información comercial sensible."),
+    ("5. Desarrollo territorial","Asignar políticas distintas según dónde puedan localizarse capacidades: Puna, Belén, Andalgalá, Tinogasta–Fiambalá o Capital."),
+    ("6. Innovación y universidad","Convertir problemas mineros recurrentes en líneas de I+D, servicios tecnológicos, laboratorios y desafíos para estudiantes e investigadores.")
+]
+
+
 # ------------------------------------------------
 # SIDEBAR
 # ------------------------------------------------
@@ -381,7 +523,7 @@ st.caption("⚠️ Todos los indicadores cuantitativos son demostrativos. El sis
 
 tabs=st.tabs([
     "🏠 Inicio","🌐 Ecosistema","⬅️ Hacia atrás","➡️ Hacia adelante",
-    "🎯 Oportunidades","📍 Territorio","🧪 Simulador","📋 Matriz"
+    "🎯 Oportunidades","📍 Territorio","🧪 Simulador","🎓 Políticas y talento","📋 Matriz"
 ])
 
 # ------------------------------------------------
@@ -756,10 +898,112 @@ with tabs[6]:
         unsafe_allow_html=True
     )
 
+
+# ------------------------------------------------
+# POLÍTICAS PÚBLICAS Y CAPITAL HUMANO
+# ------------------------------------------------
+with tabs[7]:
+    st.subheader("De la matriz a la política pública")
+    st.markdown(
+        '<div class="chart-explain"><b>Qué muestra:</b> transforma las brechas productivas de la matriz en decisiones accionables. '
+        'El objetivo es responder tres preguntas: <b>qué debería hacer el Estado, qué perfiles de capital humano deberían fortalecerse '
+        'y cómo debería reaccionar el sistema educativo.</b> Las cantidades son escenarios demostrativos agregados, no vacantes reales.</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown("### 1. Agenda de política pública")
+    pc1,pc2=st.columns(2)
+    for i,(title,desc) in enumerate(PUBLIC_POLICY_PILLARS):
+        target_col=pc1 if i%2==0 else pc2
+        with target_col:
+            st.markdown(f'<div class="reco"><strong>{title}</strong><br>{desc}</div>',unsafe_allow_html=True)
+
+    st.markdown("### 2. ¿Qué capital humano podría demandar este ecosistema?")
+    profiles=estimate_profiles(f)
+    if not profiles.empty:
+        profiles["personas_demo"]=profiles["personas_demo"].round().astype(int)
+        figp=px.bar(
+            profiles.head(12).sort_values("personas_demo"),
+            x="personas_demo",y="perfil",orientation="h",
+            text="personas_demo",
+            labels={"personas_demo":"Personas equivalentes · escenario demo","perfil":""}
+        )
+        figp.update_traces(marker_color="#2A6F8E",textposition="outside")
+        figp.update_layout(height=520,showlegend=False,margin=dict(t=10,l=0,r=30,b=10))
+        st.plotly_chart(figp,use_container_width=True)
+        st.markdown(
+            '<div class="sipm-note"><b>Cómo leerlo:</b> no significa que existan hoy estas vacantes. '
+            'Es una traducción demostrativa del empleo potencial de las actividades seleccionadas hacia familias de perfiles. '
+            'En el proyecto real, estos coeficientes deberían calibrarse con encuestas laborales, empresas, cámaras y datos educativos.</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown("### 3. ¿Qué debería hacer Universidad y Educación?")
+        selected_profile=st.selectbox(
+            "Elegí un perfil para ver una respuesta educativa",
+            profiles["perfil"].tolist(),
+            key="education_profile"
+        )
+        prow=profiles[profiles["perfil"]==selected_profile].iloc[0]
+        horizon,action,actors=education_action(selected_profile)
+
+        e1,e2,e3=st.columns([1,1.4,1.2])
+        e1.metric("Demanda equivalente demo",f"{int(prow['personas_demo']):,}")
+        e2.markdown(f"**Horizonte sugerido**  \n{horizon}")
+        e3.markdown(f"**Actores**  \n{actors}")
+        st.markdown(f'<div class="reco"><strong>Respuesta recomendada</strong><br>{action}</div>',unsafe_allow_html=True)
+
+        st.markdown("#### Acciones educativas estructurales")
+        st.markdown(
+            "- **Observatorio de perfiles mineros:** actualizar anualmente qué profesionales, técnicos y oficios aparecen como cuellos de botella.\n"
+            "- **Becas orientadas por demanda:** priorizar carreras y tecnicaturas donde la matriz detecte déficit futuro.\n"
+            "- **Microcredenciales y diplomaturas:** responder rápidamente a automatización, mantenimiento, ambiente, datos, calidad y procesos.\n"
+            "- **Prácticas profesionalizantes:** vincular estudiantes con empresas y proveedores antes del egreso.\n"
+            "- **Formación territorial:** llevar trayectos técnicos a Belén, Tinogasta–Fiambalá, Andalgalá y Antofagasta cuando la demanda lo justifique.\n"
+            "- **Investigación aplicada:** convertir brechas de proveedores o procesos en proyectos de laboratorio, tesis, innovación y transferencia tecnológica."
+        )
+
+        st.markdown("### 4. La ventaja de Catamarca: no parte de cero")
+        st.markdown(
+            "La UNCA ya cuenta con carreras directamente vinculadas al ecosistema minero —como **Ingeniería de Minas, Geología, "
+            "Ingeniería Electrónica, Informática y Procesamiento de Salmuera de Litio**— y también con nuevas capacidades en "
+            "**Ciencia de Datos y Energías Renovables**. El SIPM permitiría conectar esa oferta académica con la demanda futura, "
+            "detectar faltantes y decidir dónde conviene ampliar, especializar o crear trayectos más cortos."
+        )
+        u1,u2=st.columns(2)
+        with u1:
+            st.link_button("Oferta académica UNCA","https://www.unca.edu.ar/carreras")
+        with u2:
+            st.link_button("Facultad de Tecnología y Ciencias Aplicadas","https://www.unca.edu.ar/tecno")
+
+        st.markdown("### 5. Antecedentes que muestran que esto es posible")
+        with st.expander("Salta · educación alineada con demanda minera e industrial"):
+            st.markdown(
+                "En 2026 Salta presentó un Plan de Especialización para el Sector Minero e Industrial dirigido a estudiantes "
+                "de escuelas técnicas y nivel superior, articulado con cámaras, proveedores y sector académico."
+            )
+            st.markdown("**Aplicación SIPM:** usar la matriz para decidir qué especializaciones ofrecer, en qué territorio y con qué prioridad.")
+            st.link_button("Ver antecedente oficial","https://www.salta.gob.ar/prensa/noticias/estudiantes-saltenios-se-formaran-en-competencias-que-demandan-los-sectores-minero-e-industrial-107830")
+        with st.expander("Jujuy · modificación curricular vinculada a la matriz productiva"):
+            st.markdown(
+                "Jujuy desarrolló formación docente en minería e industria del litio y planteó adaptar diseños curriculares "
+                "para acompañar la matriz productiva provincial."
+            )
+            st.markdown("**Aplicación SIPM:** convertir las brechas detectadas por la matriz en insumos periódicos para la planificación educativa.")
+            st.link_button("Ver antecedente oficial","https://educacion.jujuy.gob.ar/2023/05/18/formacion-en-mineria-e-industria-de-litio-docentes-preparados-para-la-matriz-productiva-de-jujuy/")
+
+        st.markdown(
+            '<div class="sipm-note"><b>Principio metodológico:</b> el SIPM debería orientar educación con información agregada. '
+            'No necesita conocer el plan de contratación individual de cada minera; necesita identificar tendencias por perfil, '
+            'sector, territorio y horizonte temporal.</div>',
+            unsafe_allow_html=True
+        )
+
+
 # ------------------------------------------------
 # MATRIZ
 # ------------------------------------------------
-with tabs[7]:
+with tabs[8]:
     st.subheader("Matriz integral")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> el detalle que alimenta todo el SIPM. Cada registro conecta mineral, etapa, actividad, requerimiento, demanda, participación local, complejidad, territorio, barreras y acción sugerida. El dashboard resume; la matriz explica por qué.</div>', unsafe_allow_html=True)
     q=st.text_input("Buscar actividad, sector, producto, territorio o barrera")
