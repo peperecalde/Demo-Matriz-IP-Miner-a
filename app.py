@@ -232,7 +232,17 @@ div[data-baseweb="slider"] div[role="progressbar"]{
     .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
 }
 
+
+.drill{
+    background:#F7FAFB;
+    border:1px solid #DCE6EB;
+    border-radius:12px;
+    padding:13px 15px;
+    margin:8px 0 12px 0;
+}
+.drill b{color:#173E56;}
 </style>
+
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------
@@ -439,6 +449,7 @@ with tabs[1]:
 with tabs[2]:
     st.subheader("Eslabonamientos hacia atrás")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> cómo la actividad minera genera demanda sobre construcción, energía, logística, metalmecánica, tecnología, ambiente, servicios y otros sectores. El ancho de cada flujo representa el peso económico de esa relación. Esta vista permite entender que el impacto minero comienza mucho antes de extraer el mineral.</div>', unsafe_allow_html=True)
+
     back=f[f["tipo_eslabonamiento"]=="Hacia atrás"].copy()
     if back.empty:
         st.info("Activá Hacia atrás en el filtro lateral.")
@@ -446,7 +457,8 @@ with tabs[2]:
         agg=back.groupby("macrosector",as_index=False).agg(
             demanda=("demanda_anual_usd_demo","sum"),
             local=("participacion_catamarca_pct_demo","mean"),
-            gasto_fuera=("gasto_fuera_catamarca_usd_demo","sum")
+            gasto_fuera=("gasto_fuera_catamarca_usd_demo","sum"),
+            actividades=("actividad","nunique")
         ).sort_values("demanda",ascending=False)
 
         labels=["MINERÍA"]+agg["macrosector"].tolist()
@@ -460,12 +472,80 @@ with tabs[2]:
                 target=list(range(1,len(agg)+1)),
                 value=agg["demanda"],
                 color="rgba(49,94,116,.30)",
-                customdata=agg[["local","gasto_fuera"]].values,
-                hovertemplate="%{target.label}<br>Demanda demo: US$ %{value:,.0f}<br>Captura local: %{customdata[0]:.1f}%<br>Gasto fuera: US$ %{customdata[1]:,.0f}<extra></extra>"
+                customdata=agg[["local","gasto_fuera","actividades"]].values,
+                hovertemplate="%{target.label}<br>Demanda demo: US$ %{value:,.0f}<br>Captura local: %{customdata[0]:.1f}%<br>Gasto fuera: US$ %{customdata[1]:,.0f}<br>Actividades: %{customdata[2]}<extra></extra>"
             )
         ))
-        fig.update_layout(height=670,margin=dict(t=10,l=10,r=10,b=10),font=dict(size=12))
+        fig.update_layout(height=640,margin=dict(t=10,l=10,r=10,b=10),font=dict(size=12))
         st.plotly_chart(fig,use_container_width=True)
+
+        st.markdown("### Profundizar sin llegar a datos sensibles")
+        st.markdown(
+            '<div class="drill"><b>Nivel 1:</b> sector económico. '
+            'El SIPM muestra cuánto moviliza la minería sobre ese sector y cuánto se captura localmente.<br>'
+            '<b>Nivel 2:</b> familia de actividades. Se profundiza en tipos de capacidades requeridas, '
+            'pero sin identificar contratos, proveedores individuales, precios ni datos comerciales reservados.</div>',
+            unsafe_allow_html=True
+        )
+
+        sector_sel = st.selectbox(
+            "Elegí un sector para profundizar",
+            agg["macrosector"].tolist(),
+            key="back_sector"
+        )
+        sec = back[back["macrosector"]==sector_sel].copy()
+        activity_agg = sec.groupby("actividad",as_index=False).agg(
+            demanda=("demanda_anual_usd_demo","sum"),
+            captura=("participacion_catamarca_pct_demo","mean"),
+            empleo=("empleo_local_potencial_demo","sum"),
+            requerimientos=("requerimiento_o_producto","nunique")
+        ).sort_values("demanda",ascending=False)
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Demanda sectorial demo",f"US$ {sec['demanda_anual_usd_demo'].sum()/1e6:,.1f} M")
+        c2.metric("Captura local media",f"{sec['participacion_catamarca_pct_demo'].mean():.0f}%")
+        c3.metric("Actividades",sec["actividad"].nunique())
+        c4.metric("Empleo potencial",int(sec["empleo_local_potencial_demo"].sum()))
+
+        fig2=px.bar(
+            activity_agg.sort_values("demanda"),
+            x="demanda",y="actividad",orientation="h",
+            color="captura",
+            color_continuous_scale=["#DDE9EE","#2C6B89"],
+            hover_data=["empleo","requerimientos"],
+            labels={"demanda":"Demanda demo USD","actividad":"","captura":"% local"}
+        )
+        fig2.update_layout(height=max(330,70*len(activity_agg)),margin=dict(t=10,l=0,r=10,b=10))
+        st.plotly_chart(fig2,use_container_width=True)
+
+        activity_sel = st.selectbox(
+            "Segundo nivel: elegí una familia de actividad",
+            activity_agg["actividad"].tolist(),
+            key="back_activity"
+        )
+        det = sec[sec["actividad"]==activity_sel].copy()
+
+        st.markdown("#### Qué debería conocer el SIPM en este nivel")
+        st.markdown(
+            "- Tipo general de bien o servicio requerido.\n"
+            "- Nivel de complejidad y criticidad.\n"
+            "- Frecuencia aproximada de demanda.\n"
+            "- Capacidad local existente o potencial.\n"
+            "- Barreras de entrada: certificación, escala, capital, tecnología o experiencia.\n"
+            "- Territorio donde tendría mayor sentido desarrollar esa capacidad."
+        )
+
+        with st.expander("Ver requerimientos demostrativos agrupados",expanded=False):
+            for _,r in det.iterrows():
+                st.markdown(
+                    f"**{r['requerimiento_o_producto']}**  \n"
+                    f"Complejidad: {r['complejidad_tecnica']} · Capacidad local: {r['capacidad_local_demo']} · "
+                    f"Territorio: {r['territorio_potencial']}  \n"
+                    f"Acción sugerida: {r['accion_sugerida']}"
+                )
+                st.divider()
+
+        st.caption("El diseño deliberadamente evita bajar a empresa, proveedor, contrato, precio unitario o volumen confidencial. La unidad mínima es una categoría económica suficientemente agregada para orientar política pública.")
 
 # ------------------------------------------------
 # HACIA ADELANTE
@@ -473,27 +553,80 @@ with tabs[2]:
 with tabs[3]:
     st.subheader("Eslabonamientos hacia adelante")
     st.markdown('<div class="chart-explain"><b>Qué muestra:</b> las actividades que pueden desarrollarse después de la extracción: procesamiento, refinación, manufactura, materiales avanzados, energía o reciclaje. No implica que todas sean viables, sino que permite identificar cuáles merecen estudios de factibilidad y políticas de largo plazo.</div>', unsafe_allow_html=True)
+
     fw=f[f["tipo_eslabonamiento"]=="Hacia adelante"].copy()
     if fw.empty:
         st.info("Activá Hacia adelante en el filtro lateral.")
     else:
-        mineral=st.selectbox("Elegí una cadena",sorted(fw["mineral"].unique()),key="forward")
-        chain=fw[fw["mineral"]==mineral].sort_values("id")
-        for _,r in chain.iterrows():
-            title=f"{r['actividad']} → {r['requerimiento_o_producto']}"
-            with st.expander(title,expanded=False):
-                c1,c2,c3=st.columns([1.6,1,1])
-                c1.markdown(f"**Acción sugerida**  \n{r['accion_sugerida']}")
-                c2.metric("Captura local demo",f"{r['participacion_catamarca_pct_demo']:.0f}%")
-                c3.metric("Empleo potencial",int(r["empleo_local_potencial_demo"]))
-                st.markdown(
-                    f"**Complejidad técnica:** {r['complejidad_tecnica']}  \n"
-                    f"**Capacidad local actual:** {r['capacidad_local_demo']}  \n"
-                    f"**Barrera principal:** {r['barrera_principal']}  \n"
-                    f"**Beneficio provincial:** {r['beneficio_provincial']}  \n"
-                    f"**Territorio potencial:** {r['territorio_potencial']}  \n"
-                    f"**Cadena de valor:** {r['cadena_valor']}"
-                )
+        mineral=st.selectbox("Nivel 1: elegí una cadena mineral",sorted(fw["mineral"].unique()),key="forward")
+        chain=fw[fw["mineral"]==mineral].sort_values("id").copy()
+
+        st.markdown(
+            '<div class="drill"><b>Nivel 1:</b> cadena mineral completa. '
+            'Permite visualizar qué familias de transformación existen después de la extracción.<br>'
+            '<b>Nivel 2:</b> eslabón estratégico. Se analiza complejidad, capacidad local, barreras e impacto potencial, '
+            'sin pretender construir un estudio industrial de detalle en esta etapa.</div>',
+            unsafe_allow_html=True
+        )
+
+        # Visual chain
+        labels=[mineral.upper()] + chain["actividad"].tolist()
+        source=list(range(len(labels)-1))
+        target=list(range(1,len(labels)))
+        vals=[max(1,float(x)) for x in chain["demanda_anual_usd_demo"]]
+        fig=go.Figure(go.Sankey(
+            arrangement="snap",
+            node=dict(
+                label=labels,
+                pad=20,
+                thickness=22,
+                color=["#C99A3B"]+["#315E74"]*(len(labels)-1)
+            ),
+            link=dict(
+                source=source,
+                target=target,
+                value=vals,
+                color="rgba(49,94,116,.28)"
+            )
+        ))
+        fig.update_layout(height=430,margin=dict(t=10,l=10,r=10,b=10),font=dict(size=12))
+        st.plotly_chart(fig,use_container_width=True)
+
+        st.markdown("### Profundizar en un eslabón")
+        link_sel = st.selectbox(
+            "Nivel 2: elegí un eslabón estratégico",
+            chain.index,
+            format_func=lambda i:f"{chain.loc[i,'actividad']} → {chain.loc[i,'requerimiento_o_producto']}",
+            key="forward_link"
+        )
+        r=chain.loc[link_sel]
+
+        c1,c2,c3,c4=st.columns(4)
+        c1.metric("Mercado / demanda demo",f"US$ {r['demanda_anual_usd_demo']/1e6:,.1f} M")
+        c2.metric("Captura local demo",f"{r['participacion_catamarca_pct_demo']:.0f}%")
+        c3.metric("Complejidad",r["complejidad_tecnica"])
+        c4.metric("Empleo potencial",int(r["empleo_local_potencial_demo"]))
+
+        st.markdown(
+            f"**Qué representa este eslabón:** {r['cadena_valor']}  \n"
+            f"**Capacidad local actual:** {r['capacidad_local_demo']}  \n"
+            f"**Barrera principal:** {r['barrera_principal']}  \n"
+            f"**Acción sugerida:** {r['accion_sugerida']}  \n"
+            f"**Beneficio provincial:** {r['beneficio_provincial']}  \n"
+            f"**Territorio potencial:** {r['territorio_potencial']}"
+        )
+
+        st.markdown("#### Qué debería analizarse antes de promover este eslabón")
+        st.markdown(
+            "- Existencia de demanda suficiente y estable.\n"
+            "- Escala mínima eficiente.\n"
+            "- Disponibilidad de energía, logística e infraestructura.\n"
+            "- Tecnología y conocimiento requeridos.\n"
+            "- Capacidad de vender también a otras provincias o mercados.\n"
+            "- Conveniencia de desarrollar localmente, atraer inversión o integrarse regionalmente."
+        )
+
+        st.caption("El SIPM identifica y prioriza eslabones; no reemplaza los estudios de prefactibilidad industrial que sólo deberían realizarse sobre las oportunidades seleccionadas.")
 
 # ------------------------------------------------
 # OPORTUNIDADES
