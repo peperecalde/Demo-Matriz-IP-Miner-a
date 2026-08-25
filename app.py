@@ -147,6 +147,91 @@ h1,h2,h3 {color:var(--navy); letter-spacing:-0.025em;}
     background:#E7F0F4 !important;
     color:#123E57 !important;
 }
+
+.metric-grid{
+    display:grid;
+    grid-template-columns:repeat(6,minmax(0,1fr));
+    gap:12px;
+    margin:14px 0 8px 0;
+}
+.metric-card{
+    background:#FFFFFF;
+    border:1px solid var(--border);
+    border-radius:15px;
+    padding:14px 15px;
+    box-shadow:0 3px 12px rgba(19,49,65,.05);
+    min-width:0;
+}
+.metric-label{
+    color:#304D5C;
+    font-size:.82rem;
+    font-weight:700;
+    line-height:1.2;
+    min-height:2.05em;
+    white-space:normal;
+    overflow:visible;
+    text-overflow:clip;
+}
+.metric-value{
+    color:var(--navy);
+    font-size:1.45rem;
+    font-weight:750;
+    line-height:1.15;
+    margin-top:6px;
+    white-space:normal;
+    overflow:visible;
+    text-overflow:clip;
+    word-break:break-word;
+}
+[data-baseweb="tag"]{
+    background-color:#DCEEF5 !important;
+    color:#153D56 !important;
+}
+[data-baseweb="tag"] span{
+    color:#153D56 !important;
+}
+[data-baseweb="tag"] svg{
+    fill:#1E5A78 !important;
+}
+div[role="slider"]{
+    background-color:#2A7F9E !important;
+}
+div[data-baseweb="slider"] div[role="progressbar"]{
+    background-color:#2A7F9E !important;
+}
+.stButton > button,
+.stDownloadButton > button,
+.stLinkButton > a{
+    border-color:#2A7F9E !important;
+}
+.stButton > button:hover,
+.stDownloadButton > button:hover{
+    color:#1E5A78 !important;
+    border-color:#1E5A78 !important;
+}
+.chart-explain{
+    background:#F5F9FB;
+    border:1px solid #DCE6EB;
+    border-radius:11px;
+    padding:11px 14px;
+    color:#375565;
+    font-size:.92rem;
+    line-height:1.45;
+    margin:4px 0 12px 0;
+}
+.intro-copy{
+    color:#294858;
+    font-size:1rem;
+    line-height:1.58;
+    margin-bottom:10px;
+}
+@media (max-width:1100px){
+    .metric-grid{grid-template-columns:repeat(3,minmax(0,1fr));}
+}
+@media (max-width:650px){
+    .metric-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+}
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -271,13 +356,16 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-m1,m2,m3,m4,m5,m6=st.columns(6)
-m1.metric("Actividades",len(f))
-m2.metric("Mercado mapeado",f"US$ {total/1e6:,.0f} M")
-m3.metric("Captura local",f"{local_pct:.0%}")
-m4.metric("Gasto fuera",f"US$ {outside/1e6:,.0f} M")
-m5.metric("Empleo potencial",f"{jobs:,}")
-m6.metric("Sectores",f["macrosector"].nunique())
+st.markdown(f"""
+<div class="metric-grid">
+  <div class="metric-card"><div class="metric-label">Actividades mapeadas</div><div class="metric-value">{len(f)}</div></div>
+  <div class="metric-card"><div class="metric-label">Mercado / demanda mapeada</div><div class="metric-value">US$ {total/1e6:,.0f} M</div></div>
+  <div class="metric-card"><div class="metric-label">Captura local estimada</div><div class="metric-value">{local_pct:.0%}</div></div>
+  <div class="metric-card"><div class="metric-label">Gasto fuera de Catamarca</div><div class="metric-value">US$ {outside/1e6:,.0f} M</div></div>
+  <div class="metric-card"><div class="metric-label">Empleo potencial asociado</div><div class="metric-value">{jobs:,}</div></div>
+  <div class="metric-card"><div class="metric-label">Sectores económicos alcanzados</div><div class="metric-value">{f["macrosector"].nunique()}</div></div>
+</div>
+""", unsafe_allow_html=True)
 
 st.caption("⚠️ Todos los indicadores cuantitativos son demostrativos. El sistema final deberá alimentarse con información validada.")
 
@@ -291,6 +379,14 @@ tabs=st.tabs([
 # ------------------------------------------------
 with tabs[0]:
     st.subheader("Una lectura simple del impacto minero")
+    st.markdown("""
+<div class="intro-copy">
+El SIPM propone transformar información dispersa sobre compras, proveedores, capacidades productivas y cadenas de valor en una herramienta permanente de inteligencia económica. Su objetivo es mostrar <b>qué actividades moviliza la minería, cuánto valor puede quedar en Catamarca y dónde existen brechas concretas para desarrollar empresas, empleo, formación e inversión.</b>
+</div>
+<div class="intro-copy">
+La necesidad surge porque producir más minerales no garantiza, por sí solo, mayor desarrollo provincial. Para convertir la expansión minera en una política de desarrollo productivo, Catamarca necesita identificar sus <b>eslabonamientos hacia atrás y hacia adelante</b>, medir el contenido local, anticipar demanda y priorizar las oportunidades con mayor impacto económico y territorial.
+</div>
+""", unsafe_allow_html=True)
     a,b,c=st.columns(3)
     with a:
         st.markdown('<div class="pillar"><b>⬅️ 1. Lo que la minería necesita</b><br><br>Bienes, servicios, tecnología, energía, construcción, logística, mantenimiento, ambiente, conocimiento y trabajadores.</div>',unsafe_allow_html=True)
@@ -300,6 +396,7 @@ with tabs[0]:
         st.markdown('<div class="pillar"><b>➡️ 3. Lo que puede generar después</b><br><br>Procesamiento, metalurgia, materiales avanzados, manufacturas, energía, reciclaje y nuevas industrias.</div>',unsafe_allow_html=True)
 
     st.markdown("### ¿Dónde aparece hoy el mayor espacio de política productiva?")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> ordena los sectores según el gasto que, en este escenario demostrativo, no estaría siendo capturado por empresas de Catamarca. Cuanto mayor es la barra, mayor es la oportunidad de estudiar desarrollo de proveedores, atracción de inversiones o sustitución competitiva.</div>', unsafe_allow_html=True)
     top=f.groupby("macrosector",as_index=False).agg(
         demanda=("demanda_anual_usd_demo","sum"),
         gasto_fuera=("gasto_fuera_catamarca_usd_demo","sum"),
@@ -321,6 +418,7 @@ with tabs[0]:
 # ------------------------------------------------
 with tabs[1]:
     st.subheader("¿Qué sectores económicos moviliza la minería?")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> una visión completa del ecosistema económico asociado a la minería. El tamaño de cada bloque representa la magnitud de la demanda y el tono indica la participación local estimada. Permite detectar rápidamente qué sectores son grandes y cuáles todavía tienen baja presencia catamarqueña.</div>', unsafe_allow_html=True)
     eco=f.groupby("macrosector",as_index=False).agg(
         demanda=("demanda_anual_usd_demo","sum"),
         captura=("participacion_catamarca_pct_demo","mean"),
@@ -340,7 +438,7 @@ with tabs[1]:
 # ------------------------------------------------
 with tabs[2]:
     st.subheader("Eslabonamientos hacia atrás")
-    st.caption("Todo lo que debe existir antes y durante la operación para que la minería funcione.")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> cómo la actividad minera genera demanda sobre construcción, energía, logística, metalmecánica, tecnología, ambiente, servicios y otros sectores. El ancho de cada flujo representa el peso económico de esa relación. Esta vista permite entender que el impacto minero comienza mucho antes de extraer el mineral.</div>', unsafe_allow_html=True)
     back=f[f["tipo_eslabonamiento"]=="Hacia atrás"].copy()
     if back.empty:
         st.info("Activá Hacia atrás en el filtro lateral.")
@@ -374,7 +472,7 @@ with tabs[2]:
 # ------------------------------------------------
 with tabs[3]:
     st.subheader("Eslabonamientos hacia adelante")
-    st.caption("No muestran sólo qué compra la mina, sino qué nuevas actividades podrían surgir a partir del mineral.")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> las actividades que pueden desarrollarse después de la extracción: procesamiento, refinación, manufactura, materiales avanzados, energía o reciclaje. No implica que todas sean viables, sino que permite identificar cuáles merecen estudios de factibilidad y políticas de largo plazo.</div>', unsafe_allow_html=True)
     fw=f[f["tipo_eslabonamiento"]=="Hacia adelante"].copy()
     if fw.empty:
         st.info("Activá Hacia adelante en el filtro lateral.")
@@ -402,6 +500,7 @@ with tabs[3]:
 # ------------------------------------------------
 with tabs[4]:
     st.subheader("¿Dónde conviene mirar primero?")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> cruza participación local, gasto externo y empleo potencial. Las oportunidades más relevantes son aquellas donde existe una demanda importante, baja participación catamarqueña y capacidad de generar actividad económica. El gráfico sirve para priorizar dónde investigar primero.</div>', unsafe_allow_html=True)
     op=f.copy()
     fig=px.scatter(
         op,x="participacion_catamarca_pct_demo",y="gasto_fuera_catamarca_usd_demo",
@@ -443,6 +542,7 @@ with tabs[4]:
 # ------------------------------------------------
 with tabs[5]:
     st.subheader("Lectura territorial")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> cómo se distribuyen las oportunidades económicas según territorio potencial. Permite pasar de una política minera provincial genérica a estrategias diferenciadas para Belén, Andalgalá, Tinogasta–Fiambalá, Antofagasta de la Sierra y Capital.</div>', unsafe_allow_html=True)
     terr=f.groupby("territorio_potencial",as_index=False).agg(
         demanda=("demanda_anual_usd_demo","sum"),
         captura=("captura_local_usd_demo","sum"),
@@ -478,7 +578,7 @@ with tabs[5]:
 # ------------------------------------------------
 with tabs[6]:
     st.subheader("Simulador de política productiva")
-    st.caption("Elegí una actividad y probá un escenario de mayor participación local.")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> permite ensayar escenarios de mayor participación local en una actividad y dimensionar cuánto gasto adicional podría permanecer en la provincia. Su función no es predecir resultados, sino ayudar a decidir si una oportunidad merece políticas específicas, inversión o estudios técnicos.</div>', unsafe_allow_html=True)
 
     sim=f.sort_values("gasto_fuera_catamarca_usd_demo",ascending=False)
     idx=st.selectbox(
@@ -498,8 +598,8 @@ with tabs[6]:
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Situación actual",f"{current:.0f}%")
     c2.metric("Objetivo",f"{target}%")
-    c3.metric("Gasto retenido adicional",f"US$ {incremental/1e6:,.2f} M")
-    c4.metric("Empleo asociado demo",f"+{extra_jobs:,.0f}")
+    c3.metric("Gasto adicional retenido",f"US$ {incremental/1e6:,.2f} M")
+    c4.metric("Empleo asociado",f"+{extra_jobs:,.0f}")
 
     st.markdown("### Recomendación para Catamarca")
     for title,desc in recommended_actions(r,target):
@@ -528,6 +628,7 @@ with tabs[6]:
 # ------------------------------------------------
 with tabs[7]:
     st.subheader("Matriz integral")
+    st.markdown('<div class="chart-explain"><b>Qué muestra:</b> el detalle que alimenta todo el SIPM. Cada registro conecta mineral, etapa, actividad, requerimiento, demanda, participación local, complejidad, territorio, barreras y acción sugerida. El dashboard resume; la matriz explica por qué.</div>', unsafe_allow_html=True)
     q=st.text_input("Buscar actividad, sector, producto, territorio o barrera")
     show=f.copy()
     if q:
