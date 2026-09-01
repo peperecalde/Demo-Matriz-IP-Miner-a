@@ -229,6 +229,186 @@ def rebalance_participations(frame, indices):
 
     return frame
 
+
+
+def group_scenario_delta(base_frame, scenario_frame, group_col):
+    """Compara base vs escenario por una dimensión y devuelve deltas económicos y laborales."""
+    def agg(frame):
+        if frame.empty:
+            return pd.DataFrame(columns=[group_col, "demanda", "captura", "gasto_fuera", "empleo"])
+        return frame.groupby(group_col, as_index=False).agg(
+            demanda=("demanda_anual_usd_demo", "sum"),
+            captura=("captura_local_usd_demo", "sum"),
+            gasto_fuera=("gasto_fuera_catamarca_usd_demo", "sum"),
+            empleo=("empleo_local_potencial_demo", "sum"),
+        )
+
+    b = agg(base_frame).rename(columns={
+        "demanda":"demanda_base", "captura":"captura_base",
+        "gasto_fuera":"gasto_fuera_base", "empleo":"empleo_base"
+    })
+    s = agg(scenario_frame).rename(columns={
+        "demanda":"demanda_escenario", "captura":"captura_escenario",
+        "gasto_fuera":"gasto_fuera_escenario", "empleo":"empleo_escenario"
+    })
+    comp = b.merge(s, on=group_col, how="outer").fillna(0)
+    for metric in ["demanda", "captura", "gasto_fuera", "empleo"]:
+        comp[f"delta_{metric}"] = comp[f"{metric}_escenario"] - comp[f"{metric}_base"]
+    comp["captura_pct_base"] = comp["captura_base"].div(comp["demanda_base"].replace(0, pd.NA)).fillna(0) * 100
+    comp["captura_pct_escenario"] = comp["captura_escenario"].div(comp["demanda_escenario"].replace(0, pd.NA)).fillna(0) * 100
+    comp["delta_captura_pp"] = comp["captura_pct_escenario"] - comp["captura_pct_base"]
+    return comp
+
+
+def scenario_change_context(base_frame, scenario_frame):
+    """Resumen agregado utilizado por distintas pestañas y por el motor de políticas."""
+    b = scenario_kpis(base_frame)
+    s = scenario_kpis(scenario_frame)
+    return {
+        "base": b,
+        "scenario": s,
+        "delta_demanda": s["demanda"] - b["demanda"],
+        "delta_captura": s["captura_valor"] - b["captura_valor"],
+        "delta_gasto_fuera": s["gasto_fuera"] - b["gasto_fuera"],
+        "delta_empleo": s["empleo"] - b["empleo"],
+        "delta_captura_pp": (s["captura_pct"] - b["captura_pct"]) * 100,
+    }
+
+
+def dynamic_policy_actions(base_frame, scenario_frame):
+    """Genera acciones de política a partir de cambios observados entre la base y el escenario.
+
+    Es deliberadamente un motor de reglas transparente: no pretende reemplazar el análisis técnico,
+    sino convertir señales de la matriz en una agenda inicial de decisiones verificables.
+    """
+    if scenario_frame.empty:
+        return []
+
+    ctx = scenario_change_context(base_frame, scenario_frame)
+    actions = []
+
+    # 1) Compras anticipadas / desarrollo de proveedores según demanda y gasto externo.
+    sector_delta = group_scenario_delta(base_frame, scenario_frame, "macrosector")
+    if not sector_delta.empty:
+        top_demand = sector_delta.sort_values("delta_demanda", ascending=False).iloc[0]
+        top_outside = sector_delta.sort_values("gasto_fuera_escenario", ascending=False).iloc[0]
+        top_local_gain = sector_delta.sort_values("delta_captura_pp", ascending=False).iloc[0]
+
+        if ctx["delta_demanda"] > 0:
+            actions.append({
+                "prioridad":"Alta",
+                "frente":"Compras anticipadas",
+                "evidencia":f"La demanda del escenario aumenta US$ {ctx['delta_demanda']/1e6:,.1f} M. El mayor crecimiento aparece en {top_demand['macrosector']}.",
+                "accion":"Solicitar y consolidar planes agregados de compra a 12–36 meses; publicar categorías, especificaciones generales y cronogramas para que la oferta local pueda invertir antes de las licitaciones.",
+                "actores":"Minería + Producción + empresas mineras + cámaras",
+            })
+
+        if ctx["delta_gasto_fuera"] > 0 or ctx["delta_captura_pp"] < 0:
+            actions.append({
+                "prioridad":"Alta",
+                "frente":"Desarrollo de proveedores",
+                "evidencia":f"El gasto fuera de Catamarca queda en US$ {ctx['scenario']['gasto_fuera']/1e6:,.1f} M. {top_outside['macrosector']} concentra una de las mayores brechas.",
+                "accion":"Abrir una mesa sectorial específica: mapear proveedores locales, homologaciones, escala, capital de trabajo y barreras de compra; definir un plan de cierre de brechas con metas verificables.",
+                "actores":"Producción + CAPEM + cámaras + banca/CFI + empresas",
+            })
+        elif ctx["delta_captura_pp"] > 0.5:
+            actions.append({
+                "prioridad":"Media/Alta",
+                "frente":"Consolidación y escala",
+                "evidencia":f"La captura local mejora {ctx['delta_captura_pp']:+.1f} p.p. En {top_local_gain['macrosector']} se observa uno de los mayores avances.",
+                "accion":"Consolidar proveedores que ganan participación: productividad, financiamiento, calidad, consorcios y estrategia comercial para abastecer también Salta, Jujuy y otros mercados mineros.",
+                "actores":"Producción + empresas locales + cámaras + agencias de inversión",
+            })
+
+    # 2) Aguas abajo: prefactibilidad e inversión.
+    b_fw = base_frame[base_frame["tipo_eslabonamiento"] == "Aguas abajo"]
+    s_fw = scenario_frame[scenario_frame["tipo_eslabonamiento"] == "Aguas abajo"]
+    fw_ctx = scenario_change_context(b_fw, s_fw) if (not b_fw.empty or not s_fw.empty) else None
+    if fw_ctx and (fw_ctx["delta_demanda"] > 0 or fw_ctx["scenario"]["gasto_fuera"] > 0):
+        high_complex = s_fw[s_fw["complejidad_tecnica"].astype(str).str.lower().isin(["alta", "muy alta"])]
+        low_capacity = s_fw[s_fw["capacidad_local_demo"].astype(str).str.lower().isin(["incipiente", "parcial"])]
+        if not high_complex.empty or not low_capacity.empty:
+            actions.append({
+                "prioridad":"Estratégica",
+                "frente":"Industrialización / Aguas abajo",
+                "evidencia":f"El escenario aguas abajo moviliza US$ {fw_ctx['scenario']['demanda']/1e6:,.1f} M y combina eslabones de complejidad elevada con capacidades locales aún parciales o incipientes.",
+                "accion":"Seleccionar 2–3 eslabones y realizar prefactibilidad: escala mínima, energía, agua, logística, tecnología, socios, mercado regional y CAPEX. Diferenciar qué conviene desarrollar localmente, atraer como inversión o integrar regionalmente.",
+                "actores":"Producción + Minería + Inversiones + UNCA + INTI + privados",
+            })
+
+    # 3) Territorio: infraestructura y formación localizada.
+    terr = group_scenario_delta(base_frame, scenario_frame, "territorio_potencial")
+    if not terr.empty:
+        terr["presion"] = terr["delta_demanda"].clip(lower=0)/1e6 + terr["delta_empleo"].clip(lower=0)
+        t = terr.sort_values("presion", ascending=False).iloc[0]
+        if t["presion"] > 0:
+            actions.append({
+                "prioridad":"Alta",
+                "frente":"Desarrollo territorial",
+                "evidencia":f"{t['territorio_potencial']} concentra el mayor aumento combinado del escenario: Δ demanda US$ {t['delta_demanda']/1e6:,.1f} M y Δ empleo {t['delta_empleo']:+,.0f}.",
+                "accion":"Preparar una agenda territorial específica: infraestructura habilitante, formación local, logística, suelo/servicios productivos y vinculación de proveedores del territorio con los nuevos requerimientos.",
+                "actores":"Provincia + municipio + Educación + Producción + Infraestructura",
+            })
+
+    # 4) Capital humano: perfiles con mayor incremento equivalente.
+    bp = estimate_profiles(base_frame)
+    sp = estimate_profiles(scenario_frame)
+    if not sp.empty:
+        bp2 = bp.rename(columns={"personas_demo":"base"}) if not bp.empty else pd.DataFrame(columns=["perfil","base"])
+        sp2 = sp.rename(columns={"personas_demo":"escenario"})
+        pc = bp2.merge(sp2, on="perfil", how="outer").fillna(0)
+        pc["delta"] = pc["escenario"] - pc["base"]
+        p = pc.sort_values("delta", ascending=False).iloc[0]
+        if p["delta"] > 0:
+            horizon, edu_action, actors = education_action(p["perfil"])
+            actions.append({
+                "prioridad":"Alta" if p["delta"] >= 25 else "Media",
+                "frente":"Capital humano",
+                "evidencia":f"El perfil con mayor incremento equivalente es {p['perfil']}: {p['delta']:+,.0f} personas respecto de la base demostrativa.",
+                "accion":f"{edu_action} Horizonte sugerido: {horizon}.",
+                "actores":actors,
+            })
+
+    # 5) Riesgo de suministro: criticidad alta + baja captura local.
+    risky = scenario_frame[
+        (scenario_frame["criticidad"].astype(str).str.lower() == "alta") &
+        (scenario_frame["participacion_catamarca_pct_demo"] < 30)
+    ].copy()
+    if not risky.empty:
+        risky = risky.sort_values("gasto_fuera_catamarca_usd_demo", ascending=False)
+        r = risky.iloc[0]
+        actions.append({
+            "prioridad":"Alta",
+            "frente":"Seguridad de abastecimiento",
+            "evidencia":f"{r['macrosector']} · {r['requerimiento_o_producto']} combina criticidad alta, captura local de {r['participacion_catamarca_pct_demo']:.0f}% y gasto externo relevante.",
+            "accion":"No tratarlo sólo como sustitución de importaciones: evaluar riesgo de interrupción, stock crítico, proveedores alternativos, contratos marco, homologación y capacidad local/regional de respuesta.",
+            "actores":"Minería + empresas + proveedores + logística + Producción",
+        })
+
+    # Si no hubo señales fuertes, mantener una agenda de monitoreo.
+    if not actions:
+        actions.append({
+            "prioridad":"Seguimiento",
+            "frente":"Monitoreo del escenario",
+            "evidencia":"Los cambios aplicados no generan, con las reglas demostrativas actuales, una alteración estructural significativa de los indicadores agregados.",
+            "accion":"Mantener seguimiento por sector, territorio y perfil; validar supuestos con empresas y actualizar la matriz antes de diseñar instrumentos específicos.",
+            "actores":"Unidad SIPM + Minería + Producción",
+        })
+
+    return actions[:7]
+
+
+def profile_delta_table(base_frame, scenario_frame):
+    bp = estimate_profiles(base_frame)
+    sp = estimate_profiles(scenario_frame)
+    if bp.empty and sp.empty:
+        return pd.DataFrame(columns=["perfil", "base", "escenario", "delta"])
+    bp = bp.rename(columns={"personas_demo":"base"}) if not bp.empty else pd.DataFrame(columns=["perfil","base"])
+    sp = sp.rename(columns={"personas_demo":"escenario"}) if not sp.empty else pd.DataFrame(columns=["perfil","escenario"])
+    out = bp.merge(sp, on="perfil", how="outer").fillna(0)
+    out["delta"] = out["escenario"] - out["base"]
+    return out.sort_values("delta", ascending=False)
+
 # ------------------------------------------------
 # IDENTIDAD VISUAL
 # ------------------------------------------------
@@ -660,32 +840,69 @@ PUBLIC_POLICY_PILLARS = [
 
 
 # ------------------------------------------------
-# SIDEBAR
+# ESCENARIO GLOBAL + SIDEBAR
 # ------------------------------------------------
+# Los controles del escenario siguen viviendo exclusivamente en la pestaña Simulador,
+# pero una vez aplicado un escenario pasa a alimentar TODO el SIPM hasta restaurar la base.
+if "sipm_scenario_df" not in st.session_state:
+    st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
+if "sipm_scenario_source" not in st.session_state:
+    st.session_state["sipm_scenario_source"] = "Base SIPM"
+if "sipm_scenario_active" not in st.session_state:
+    st.session_state["sipm_scenario_active"] = False
+
+scenario_active = bool(st.session_state.get("sipm_scenario_active", False))
+scenario_global_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
+active_df = scenario_global_df.copy() if scenario_active else prepare_scenario_data(df.copy())
+
+# Las opciones del filtro consideran base + escenario para no perder categorías
+# cuando se edita mineral, etapa o territorio dentro del constructor.
+filter_catalog = pd.concat([prepare_scenario_data(df.copy()), active_df], ignore_index=True)
+mineral_options = sorted(filter_catalog["mineral"].dropna().astype(str).unique())
+linkage_options = [x for x in ["Aguas arriba", "Aguas abajo"] if x in set(filter_catalog["tipo_eslabonamiento"].astype(str))]
+stage_options = sorted(filter_catalog["etapa_proyecto"].dropna().astype(str).unique())
+territory_options = sorted(filter_catalog["territorio_potencial"].dropna().astype(str).unique())
+
+# Cuando se activa/cambia un escenario, incluimos automáticamente todas las categorías
+# para que una modificación territorial o estructural no desaparezca por un filtro viejo.
+if st.session_state.pop("sipm_reset_filters", False):
+    st.session_state["sidebar_minerals"] = mineral_options
+    st.session_state["sidebar_linkages"] = linkage_options
+    st.session_state["sidebar_stages"] = stage_options
+    st.session_state["sidebar_territories"] = territory_options
+
 with st.sidebar:
     st.markdown("## ⛏️ SIPM")
     st.markdown("**Inteligencia Productiva Minera**")
     st.caption("PROTOTIPO INSTITUCIONAL · CATAMARCA")
+    if scenario_active:
+        st.markdown("🟠 **ESCENARIO ACTIVO**")
+        st.caption(st.session_state.get("sipm_scenario_source", "Escenario modificado"))
+    else:
+        st.caption("🔵 Base SIPM activa")
     st.divider()
     st.markdown("### Filtros")
-    minerals = st.multiselect("Mineral", sorted(df["mineral"].unique()), default=sorted(df["mineral"].unique()))
-    linkage_options = ["Aguas arriba", "Aguas abajo"]
-    linkages = st.multiselect(
-        "Eslabonamiento",
-        linkage_options,
-        default=linkage_options
-    )
-    stages = st.multiselect("Etapa del proyecto", sorted(df["etapa_proyecto"].unique()), default=sorted(df["etapa_proyecto"].unique()))
-    territories = st.multiselect("Territorio potencial", sorted(df["territorio_potencial"].unique()), default=sorted(df["territorio_potencial"].unique()))
+    minerals = st.multiselect("Mineral", mineral_options, default=mineral_options, key="sidebar_minerals")
+    linkages = st.multiselect("Eslabonamiento", linkage_options, default=linkage_options, key="sidebar_linkages")
+    stages = st.multiselect("Etapa del proyecto", stage_options, default=stage_options, key="sidebar_stages")
+    territories = st.multiselect("Territorio potencial", territory_options, default=territory_options, key="sidebar_territories")
     st.divider()
     st.markdown("**Lectura rápida**")
-    st.caption("Los filtros actualizan todo el tablero. Los valores económicos y de empleo son simulados para demostrar la metodología.")
+    st.caption("Los filtros actualizan todo el tablero. Si hay un escenario activo, todas las pestañas se recalculan con ese escenario.")
 
-f = df[
-    df["mineral"].isin(minerals) &
-    df["tipo_eslabonamiento"].isin(linkages) &
-    df["etapa_proyecto"].isin(stages) &
-    df["territorio_potencial"].isin(territories)
+f = active_df[
+    active_df["mineral"].astype(str).isin(minerals) &
+    active_df["tipo_eslabonamiento"].astype(str).isin(linkages) &
+    active_df["etapa_proyecto"].astype(str).isin(stages) &
+    active_df["territorio_potencial"].astype(str).isin(territories)
+].copy()
+
+# La misma selección aplicada a la base original permite medir los deltas del escenario.
+base_f = df[
+    df["mineral"].astype(str).isin(minerals) &
+    df["tipo_eslabonamiento"].astype(str).isin(linkages) &
+    df["etapa_proyecto"].astype(str).isin(stages) &
+    df["territorio_potencial"].astype(str).isin(territories)
 ].copy()
 
 if f.empty:
@@ -721,6 +938,18 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.caption("⚠️ Todos los indicadores cuantitativos son demostrativos. El sistema final deberá alimentarse con información validada.")
+
+if scenario_active:
+    ctx_global = scenario_change_context(base_f, f)
+    st.markdown(
+        f'<div class="sipm-note"><b>🟠 ESCENARIO ACTIVO EN TODO EL SIPM.</b> '
+        f'Las pestañas siguientes se recalculan con <b>{st.session_state.get("sipm_scenario_source", "escenario modificado")}</b>. '
+        f'Respecto de la base visible: Δ demanda <b>US$ {ctx_global["delta_demanda"]/1e6:+,.1f} M</b> · '
+        f'Δ captura local <b>{ctx_global["delta_captura_pp"]:+.1f} p.p.</b> · '
+        f'Δ empleo potencial <b>{ctx_global["delta_empleo"]:+,.0f}</b>. '
+        f'Podés volver a la base desde Simulador.</div>',
+        unsafe_allow_html=True
+    )
 
 tabs=st.tabs([
     "🏠 Inicio","🌐 Ecosistema","⬅️ Aguas arriba","➡️ Aguas abajo",
@@ -821,6 +1050,27 @@ with tabs[2]:
         ))
         fig.update_layout(height=640,margin=dict(t=10,l=10,r=10,b=10),font=dict(size=12))
         st.plotly_chart(fig,use_container_width=True)
+
+        if scenario_active:
+            st.markdown("### Impacto del escenario · Aguas arriba")
+            base_back = base_f[base_f["tipo_eslabonamiento"]=="Aguas arriba"].copy()
+            comp_back = group_scenario_delta(base_back, back, "macrosector")
+            if not comp_back.empty:
+                cb1, cb2, cb3 = st.columns(3)
+                cb1.metric("Δ demanda aguas arriba", f"US$ {comp_back['delta_demanda'].sum()/1e6:+,.1f} M")
+                cb2.metric("Δ gasto fuera", f"US$ {comp_back['delta_gasto_fuera'].sum()/1e6:+,.1f} M")
+                cb3.metric("Δ empleo potencial", f"{comp_back['delta_empleo'].sum():+,.0f}")
+                plot_back = comp_back[comp_back["delta_demanda"].abs() > 0].sort_values("delta_demanda")
+                if not plot_back.empty:
+                    fig_delta_back = px.bar(
+                        plot_back, x="delta_demanda", y="macrosector", orientation="h",
+                        labels={"delta_demanda":"Cambio de demanda vs base · USD","macrosector":""},
+                        text_auto=".2s"
+                    )
+                    fig_delta_back.update_traces(marker_color="#C99A3B")
+                    fig_delta_back.update_layout(height=max(320,55*len(plot_back)),showlegend=False,margin=dict(t=5,l=0,r=10,b=10))
+                    st.plotly_chart(fig_delta_back,use_container_width=True)
+                    st.caption("Las barras muestran qué sectores aguas arriba ganan o pierden peso económico respecto de la base. Esta lectura alimenta desarrollo de proveedores, compras anticipadas e infraestructura habilitante.")
 
         st.markdown("### Profundizar sin llegar a datos sensibles")
         st.markdown(
@@ -935,6 +1185,27 @@ with tabs[3]:
         fig.update_layout(height=430,margin=dict(t=10,l=10,r=10,b=10),font=dict(size=12))
         st.plotly_chart(fig,use_container_width=True)
 
+        if scenario_active:
+            st.markdown(f"### Impacto del escenario · Aguas abajo · {mineral}")
+            base_fw_m = base_f[(base_f["tipo_eslabonamiento"]=="Aguas abajo") & (base_f["mineral"]==mineral)].copy()
+            comp_fw = group_scenario_delta(base_fw_m, chain, "actividad")
+            if not comp_fw.empty:
+                cf1,cf2,cf3 = st.columns(3)
+                cf1.metric("Δ mercado / demanda", f"US$ {comp_fw['delta_demanda'].sum()/1e6:+,.1f} M")
+                cf2.metric("Δ captura local", f"US$ {comp_fw['delta_captura'].sum()/1e6:+,.1f} M")
+                cf3.metric("Δ empleo potencial", f"{comp_fw['delta_empleo'].sum():+,.0f}")
+                plot_fw = comp_fw[comp_fw["delta_demanda"].abs() > 0].sort_values("delta_demanda")
+                if not plot_fw.empty:
+                    fig_delta_fw = px.bar(
+                        plot_fw, x="delta_demanda", y="actividad", orientation="h",
+                        labels={"delta_demanda":"Cambio de demanda vs base · USD","actividad":""},
+                        text_auto=".2s"
+                    )
+                    fig_delta_fw.update_traces(marker_color="#C99A3B")
+                    fig_delta_fw.update_layout(height=max(300,60*len(plot_fw)),showlegend=False,margin=dict(t=5,l=0,r=10,b=10))
+                    st.plotly_chart(fig_delta_fw,use_container_width=True)
+                    st.caption("Un aumento aguas abajo no se interpreta automáticamente como una industria viable: señala dónde conviene activar prefactibilidad, atracción de inversiones, I+D y evaluación de escala regional.")
+
         st.markdown("### Profundizar en un eslabón")
         link_sel = st.selectbox(
             "Nivel 2: elegí un eslabón estratégico",
@@ -992,6 +1263,25 @@ with tabs[4]:
     st.plotly_chart(fig,use_container_width=True)
     st.markdown('<div class="sipm-note"><b>Zona crítica:</b> las actividades ubicadas arriba y a la izquierda combinan alto gasto externo con baja captura local. Son candidatas a estudios de factibilidad y desarrollo de proveedores.</div>',unsafe_allow_html=True)
 
+    if scenario_active:
+        st.markdown("### Cómo cambió el mapa de oportunidades")
+        base_high = int((base_f["prioridad_demo"]=="Alta").sum())
+        sc_high = int((op["prioridad_demo"]=="Alta").sum())
+        co1,co2,co3 = st.columns(3)
+        co1.metric("Oportunidades de prioridad alta", sc_high, delta=sc_high-base_high)
+        co2.metric("Δ gasto fuera", f"US$ {(op['gasto_fuera_catamarca_usd_demo'].sum()-base_f['gasto_fuera_catamarca_usd_demo'].sum())/1e6:+,.1f} M")
+        co3.metric("Δ captura local", f"US$ {(op['captura_local_usd_demo'].sum()-base_f['captura_local_usd_demo'].sum())/1e6:+,.1f} M")
+        sector_op = group_scenario_delta(base_f, op, "macrosector")
+        sector_op["presion_oportunidad"] = sector_op["gasto_fuera_escenario"] - sector_op["gasto_fuera_base"]
+        sector_op = sector_op[sector_op["presion_oportunidad"].abs()>0].sort_values("presion_oportunidad")
+        if not sector_op.empty:
+            fig_op_delta = px.bar(sector_op, x="presion_oportunidad", y="macrosector", orientation="h",
+                                  labels={"presion_oportunidad":"Cambio del gasto fuera vs base · USD","macrosector":""}, text_auto=".2s")
+            fig_op_delta.update_traces(marker_color="#C99A3B")
+            fig_op_delta.update_layout(height=max(300,50*len(sector_op)),showlegend=False,margin=dict(t=5,l=0,r=10,b=10))
+            st.plotly_chart(fig_op_delta,use_container_width=True)
+            st.caption("Un aumento del gasto externo en un sector eleva la presión de política productiva; una caída puede reflejar mayor captura local o menor demanda. La causa debe leerse junto con los demás indicadores.")
+
     top=op.sort_values(["puntaje_oportunidad_demo","gasto_fuera_catamarca_usd_demo"],ascending=False).head(12)
     choice=st.selectbox(
         "Abrir ficha completa de una oportunidad",
@@ -1035,6 +1325,29 @@ with tabs[5]:
     )
     fig.update_layout(height=520)
     st.plotly_chart(fig,use_container_width=True)
+
+    if scenario_active:
+        st.markdown("### Territorios más afectados por el escenario")
+        terr_delta = group_scenario_delta(base_f, f, "territorio_potencial")
+        terr_delta["impacto_abs"] = terr_delta["delta_demanda"].abs()/1e6 + terr_delta["delta_empleo"].abs()
+        terr_delta = terr_delta.sort_values("impacto_abs", ascending=False)
+        if not terr_delta.empty:
+            td = terr_delta.iloc[0]
+            tt1,tt2,tt3 = st.columns(3)
+            tt1.metric("Mayor cambio territorial", str(td["territorio_potencial"]))
+            tt2.metric("Δ demanda", f"US$ {td['delta_demanda']/1e6:+,.1f} M")
+            tt3.metric("Δ empleo potencial", f"{td['delta_empleo']:+,.0f}")
+            terr_long = terr_delta.melt(
+                id_vars=["territorio_potencial"],
+                value_vars=["delta_demanda","delta_captura"],
+                var_name="variable", value_name="valor"
+            )
+            terr_long["variable"] = terr_long["variable"].map({"delta_demanda":"Δ Demanda","delta_captura":"Δ Captura local"})
+            fig_td = px.bar(terr_long, x="valor", y="territorio_potencial", color="variable", orientation="h",
+                            barmode="group", labels={"valor":"Cambio vs base · USD","territorio_potencial":"","variable":""})
+            fig_td.update_layout(height=max(340,55*terr_delta["territorio_potencial"].nunique()),margin=dict(t=5,l=0,r=10,b=10))
+            st.plotly_chart(fig_td,use_container_width=True)
+            st.caption("Esta comparación sirve para anticipar dónde deberían concentrarse infraestructura, formación, servicios productivos y coordinación con municipios.")
 
     place=st.selectbox("Explorar territorio",sorted(f["territorio_potencial"].unique()))
     tp=f[f["territorio_potencial"]==place].sort_values("demanda_anual_usd_demo",ascending=False)
@@ -1104,14 +1417,10 @@ with tabs[6]:
     st.markdown(
         '<div class="chart-explain"><b>Qué permite:</b> construir escenarios completos sin modificar la base SIPM. '
         'Podés partir de la matriz actual, cargar un CSV/Excel previamente editado, aplicar cambios masivos combinables '
-        'o editar registros individuales. Luego el sistema recalcula demanda, captura local, gasto externo, empleo y prioridad.</div>',
+        'o editar registros individuales. Al aplicarlo, <b>el escenario pasa a alimentar todo el SIPM</b>: indicadores, Aguas arriba, Aguas abajo, '
+        'oportunidades, territorio, matriz y Políticas y talento.</div>',
         unsafe_allow_html=True
     )
-
-    # El escenario vive sólo dentro del Simulador y no altera las demás pestañas.
-    if "sipm_scenario_df" not in st.session_state:
-        st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
-        st.session_state["sipm_scenario_source"] = "Base SIPM"
 
     st.markdown("### 1. Elegir la base del escenario")
     src1, src2 = st.columns([1.4, 1])
@@ -1136,6 +1445,8 @@ with tabs[6]:
                     if st.button("Usar archivo cargado como escenario", type="primary", key="use_uploaded_scenario"):
                         st.session_state["sipm_scenario_df"] = prepare_scenario_data(uploaded_df)
                         st.session_state["sipm_scenario_source"] = f"Archivo: {uploaded_scenario.name}"
+                        st.session_state["sipm_scenario_active"] = True
+                        st.session_state["sipm_reset_filters"] = True
                         st.rerun()
             except Exception as e:
                 st.error(f"No se pudo leer el archivo: {e}")
@@ -1146,6 +1457,8 @@ with tabs[6]:
         if st.button("↺ Restaurar escenario base", key="restore_scenario"):
             st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
             st.session_state["sipm_scenario_source"] = "Base SIPM"
+            st.session_state["sipm_scenario_active"] = False
+            st.session_state["sipm_reset_filters"] = True
             st.rerun()
 
     scenario_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
@@ -1334,6 +1647,8 @@ with tabs[6]:
 
                 st.session_state["sipm_scenario_df"] = prepare_scenario_data(work)
                 st.session_state["sipm_scenario_source"] = st.session_state.get("sipm_scenario_source", "Base SIPM") + " · modificado"
+                st.session_state["sipm_scenario_active"] = True
+                st.session_state["sipm_reset_filters"] = True
                 st.rerun()
 
         st.markdown("### 4. Edición detallada · todas las variables")
@@ -1384,19 +1699,21 @@ with tabs[6]:
                 work = rebalance_participations(work, edited_frame.index)
             st.session_state["sipm_scenario_df"] = prepare_scenario_data(work)
             st.session_state["sipm_scenario_source"] = st.session_state.get("sipm_scenario_source", "Base SIPM") + " · edición detallada"
+            st.session_state["sipm_scenario_active"] = True
+            st.session_state["sipm_reset_filters"] = True
             st.rerun()
 
         st.markdown("### 5. Resultado del escenario · comparación con la base")
         scenario_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
         scenario_visible = filter_like_sidebar(scenario_df)
-        base_visible = f.copy()
+        base_visible = base_f.copy()
 
         base_kpi = scenario_kpis(base_visible)
         sc_kpi = scenario_kpis(scenario_visible)
 
         st.markdown(
-            '<div class="sipm-note"><b>ESCENARIO SIMULADO:</b> los resultados siguientes pueden contener datos cargados o modificaciones realizadas durante la sesión. '
-            'No reemplazan la base SIPM ni deben interpretarse como resultados observados.</div>',
+            '<div class="sipm-note"><b>ESCENARIO SIMULADO Y ACTIVO:</b> los resultados pueden contener datos cargados o modificaciones realizadas durante la sesión. '
+            'Mientras el escenario esté activo, <b>todas las pestañas del SIPM</b> se calculan con estos valores. No reemplazan la base SIPM ni deben interpretarse como resultados observados.</div>',
             unsafe_allow_html=True
         )
 
@@ -1502,14 +1819,67 @@ with tabs[7]:
         unsafe_allow_html=True
     )
 
-    st.markdown("### 1. Agenda de política pública")
+    if scenario_active:
+        st.markdown("### Lectura automática del escenario → agenda de decisión")
+        st.markdown(
+            '<div class="sipm-note"><b>Esta es la función central del SIPM:</b> no sólo mostrar qué cambió, sino traducir los cambios de demanda, captura local, complejidad, territorio y empleo en una agenda inicial de acción pública. '
+            'Las recomendaciones son reglas demostrativas y deben validarse con información real antes de transformarse en política.</div>',
+            unsafe_allow_html=True
+        )
+        ctx_policy = scenario_change_context(base_f, f)
+        pp1,pp2,pp3,pp4 = st.columns(4)
+        pp1.metric("Δ demanda", f"US$ {ctx_policy['delta_demanda']/1e6:+,.1f} M")
+        pp2.metric("Δ captura local", f"{ctx_policy['delta_captura_pp']:+.1f} p.p.")
+        pp3.metric("Δ gasto fuera", f"US$ {ctx_policy['delta_gasto_fuera']/1e6:+,.1f} M")
+        pp4.metric("Δ empleo potencial", f"{ctx_policy['delta_empleo']:+,.0f}")
+
+        policy_actions = dynamic_policy_actions(base_f, f)
+        for i,pa in enumerate(policy_actions,1):
+            st.markdown(
+                f'<div class="reco"><strong>{i}. {pa["frente"]} · prioridad {pa["prioridad"]}</strong><br>'
+                f'<b>Señal del escenario:</b> {pa["evidencia"]}<br>'
+                f'<b>Acción sugerida:</b> {pa["accion"]}<br>'
+                f'<b>Actores:</b> {pa["actores"]}</div>',
+                unsafe_allow_html=True
+            )
+
+        st.markdown("### Impacto del escenario sobre capital humano")
+        pdeltas = profile_delta_table(base_f, f)
+        pdeltas_nonzero = pdeltas[pdeltas["delta"].abs() > 0].copy()
+        if not pdeltas_nonzero.empty:
+            fig_prof_delta = px.bar(
+                pdeltas_nonzero.head(12).sort_values("delta"),
+                x="delta", y="perfil", orientation="h", text="delta",
+                labels={"delta":"Cambio de personas equivalentes vs base","perfil":""}
+            )
+            fig_prof_delta.update_traces(marker_color="#C99A3B", texttemplate="%{text:+.0f}")
+            fig_prof_delta.update_layout(height=500,showlegend=False,margin=dict(t=5,l=0,r=30,b=10))
+            st.plotly_chart(fig_prof_delta,use_container_width=True)
+            top_profiles = pdeltas_nonzero.sort_values("delta",ascending=False).head(5)
+            st.markdown("#### Respuesta educativa prioritaria ante este escenario")
+            for _,pr in top_profiles.iterrows():
+                if pr["delta"] <= 0:
+                    continue
+                horizon, action, actors = education_action(pr["perfil"])
+                st.markdown(
+                    f'<div class="drill"><b>{pr["perfil"]}</b> · Δ {pr["delta"]:+,.0f} personas equivalentes<br>'
+                    f'<b>Horizonte:</b> {horizon}<br><b>Respuesta:</b> {action}<br><b>Actores:</b> {actors}</div>',
+                    unsafe_allow_html=True
+                )
+        else:
+            st.caption("El escenario actual no modifica el empleo potencial ni la composición sectorial suficiente para alterar la estimación de perfiles respecto de la base visible.")
+
+        st.markdown("### Agenda estructural de política pública")
+    else:
+        st.markdown("### 1. Agenda de política pública")
+
     pc1,pc2=st.columns(2)
     for i,(title,desc) in enumerate(PUBLIC_POLICY_PILLARS):
         target_col=pc1 if i%2==0 else pc2
         with target_col:
             st.markdown(f'<div class="reco"><strong>{title}</strong><br>{desc}</div>',unsafe_allow_html=True)
 
-    st.markdown("### 2. ¿Qué capital humano podría demandar este ecosistema?")
+    st.markdown("### Capital humano asociado a la selección actual")
     profiles=estimate_profiles(f)
     if not profiles.empty:
         profiles["personas_demo"]=profiles["personas_demo"].round().astype(int)
@@ -1529,7 +1899,7 @@ with tabs[7]:
             unsafe_allow_html=True
         )
 
-        st.markdown("### 3. ¿Qué debería hacer Universidad y Educación?")
+        st.markdown("### ¿Qué debería hacer Universidad y Educación?")
         selected_profile=st.selectbox(
             "Elegí un perfil para ver una respuesta educativa",
             profiles["perfil"].tolist(),
@@ -1554,7 +1924,7 @@ with tabs[7]:
             "- **Investigación aplicada:** convertir brechas de proveedores o procesos en proyectos de laboratorio, tesis, innovación y transferencia tecnológica."
         )
 
-        st.markdown("### 4. La ventaja de Catamarca: no parte de cero")
+        st.markdown("### La ventaja de Catamarca: no parte de cero")
         st.markdown(
             "La UNCA ya cuenta con carreras directamente vinculadas al ecosistema minero —como **Ingeniería de Minas, Geología, "
             "Ingeniería Electrónica, Informática y Procesamiento de Salmuera de Litio**— y también con nuevas capacidades en "
@@ -1567,7 +1937,7 @@ with tabs[7]:
         with u2:
             st.link_button("Facultad de Tecnología y Ciencias Aplicadas","https://www.unca.edu.ar/tecno")
 
-        st.markdown("### 5. Antecedentes que muestran que esto es posible")
+        st.markdown("### Antecedentes que muestran que esto es posible")
         with st.expander("Salta · educación alineada con demanda minera e industrial"):
             st.markdown(
                 "En 2026 Salta presentó un Plan de Especialización para el Sector Minero e Industrial dirigido a estudiantes "
