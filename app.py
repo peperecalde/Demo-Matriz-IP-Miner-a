@@ -107,7 +107,10 @@ def prepare_scenario_data(frame):
     ]
     for col in numeric_cols:
         if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce")
+            # Forzamos float porque los escenarios pueden generar decimales.
+            # Pandas 3.x ya no permite asignar floats dentro de columnas int
+            # mediante .loc sin una conversión explícita.
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype(float)
 
     # Límites lógicos para porcentajes y valores que no deberían ser negativos.
     for col in [
@@ -178,21 +181,52 @@ def scenario_kpis(frame):
 
 
 def rebalance_participations(frame, indices):
-    """Reescala las tres participaciones para que sumen 100 manteniendo su relación relativa."""
+    """Reescala las tres participaciones para que sumen 100 manteniendo su relación relativa.
+
+    La conversión explícita a float evita errores de dtype en pandas 3.x
+    cuando una base CSV/Excel trae porcentajes guardados como enteros.
+    """
+    frame = frame.copy()
+
     cols = [
         "participacion_catamarca_pct_demo",
         "participacion_resto_arg_pct_demo",
         "participacion_importada_pct_demo",
     ]
-    values = frame.loc[indices, cols].clip(lower=0)
+
+    # Conversión defensiva: los porcentajes del escenario deben admitir decimales.
+    for col in cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0).astype(float)
+
+    # Normalizamos los índices para evitar problemas si provienen de filtros,
+    # data_editor o archivos externos.
+    selected_indices = frame.index.intersection(pd.Index(indices))
+
+    if len(selected_indices) == 0:
+        return frame
+
+    values = frame.loc[selected_indices, cols].clip(lower=0).astype(float)
     totals = values.sum(axis=1)
     valid = totals > 0
+
     if valid.any():
-        frame.loc[values.index[valid], cols] = values.loc[valid].div(totals.loc[valid], axis=0) * 100
+        valid_idx = values.index[valid]
+        normalized = (
+            values.loc[valid_idx]
+            .div(totals.loc[valid_idx], axis=0)
+            .mul(100.0)
+        )
+        # Asignación por columna para mantener dtype float de forma estable
+        # en pandas 3.x.
+        for col in cols:
+            frame.loc[valid_idx, col] = normalized[col].to_numpy(dtype=float)
+
     if (~valid).any():
-        frame.loc[values.index[~valid], "participacion_catamarca_pct_demo"] = 100
-        frame.loc[values.index[~valid], "participacion_resto_arg_pct_demo"] = 0
-        frame.loc[values.index[~valid], "participacion_importada_pct_demo"] = 0
+        zero_idx = values.index[~valid]
+        frame.loc[zero_idx, "participacion_catamarca_pct_demo"] = 100.0
+        frame.loc[zero_idx, "participacion_resto_arg_pct_demo"] = 0.0
+        frame.loc[zero_idx, "participacion_importada_pct_demo"] = 0.0
+
     return frame
 
 # ------------------------------------------------
