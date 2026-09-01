@@ -5,6 +5,15 @@ import plotly.graph_objects as go
 from pathlib import Path
 from io import BytesIO
 import math
+from sipm_engine import (
+    DERIVED_COLUMNS as ENGINE_DERIVED_COLUMNS,
+    PARTICIPATION_COLS,
+    prepare_scenario as engine_prepare_scenario,
+    apply_participation_deltas,
+    validate_scenario_math,
+    baseline_invariance_check,
+    exact_demand_change_check,
+)
 
 st.set_page_config(
     page_title="SIPM Catamarca — Inteligencia Productiva",
@@ -57,95 +66,23 @@ def load_data():
 df = load_data()
 
 # ------------------------------------------------
-# UTILIDADES PARA ESCENARIOS
+# UTILIDADES PARA ESCENARIOS · MOTOR MATEMÁTICO v2.9
 # ------------------------------------------------
-# Columnas originales de la matriz. Las variables calculadas se regeneran
-# automáticamente para evitar inconsistencias al editar o cargar escenarios.
-SCENARIO_DERIVED_COLUMNS = [
+# La Base SIPM permanece inalterada. El motor de escenarios recalcula las
+# variables derivadas y valida todas las identidades antes de mostrar resultados.
+SCENARIO_DERIVED_COLUMNS = list(dict.fromkeys([
     "captura_local_usd_demo",
     "gasto_fuera_catamarca_usd_demo",
     "puntaje_oportunidad_demo",
     "prioridad_demo",
-]
-
-SCENARIO_REQUIRED_COLUMNS = [
-    c for c in df.columns if c not in SCENARIO_DERIVED_COLUMNS
-]
+    *ENGINE_DERIVED_COLUMNS,
+]))
+SCENARIO_REQUIRED_COLUMNS = [c for c in df.columns if c not in SCENARIO_DERIVED_COLUMNS]
 
 
 def prepare_scenario_data(frame):
-    """Normaliza y recalcula un DataFrame de escenario sin alterar la base SIPM."""
-    out = frame.copy()
-
-    # Acepta terminología histórica para que archivos anteriores sigan funcionando.
-    if "tipo_eslabonamiento" in out.columns:
-        out["tipo_eslabonamiento"] = (
-            out["tipo_eslabonamiento"]
-            .astype(str)
-            .str.strip()
-            .replace({
-                "Hacia atrás": "Aguas arriba",
-                "Hacia atras": "Aguas arriba",
-                "hacia atrás": "Aguas arriba",
-                "hacia atras": "Aguas arriba",
-                "Aguas Arriba": "Aguas arriba",
-                "aguas arriba": "Aguas arriba",
-                "Hacia adelante": "Aguas abajo",
-                "hacia adelante": "Aguas abajo",
-                "Aguas Abajo": "Aguas abajo",
-                "aguas abajo": "Aguas abajo",
-            })
-        )
-
-    # Variables numéricas críticas: conversión defensiva.
-    numeric_cols = [
-        "demanda_anual_usd_demo",
-        "participacion_catamarca_pct_demo",
-        "participacion_resto_arg_pct_demo",
-        "participacion_importada_pct_demo",
-        "empleo_local_potencial_demo",
-    ]
-    for col in numeric_cols:
-        if col in out.columns:
-            # Forzamos float porque los escenarios pueden generar decimales.
-            # Pandas 3.x ya no permite asignar floats dentro de columnas int
-            # mediante .loc sin una conversión explícita.
-            out[col] = pd.to_numeric(out[col], errors="coerce").astype(float)
-
-    # Límites lógicos para porcentajes y valores que no deberían ser negativos.
-    for col in [
-        "participacion_catamarca_pct_demo",
-        "participacion_resto_arg_pct_demo",
-        "participacion_importada_pct_demo",
-    ]:
-        if col in out.columns:
-            out[col] = out[col].fillna(0).clip(lower=0, upper=100)
-
-    if "demanda_anual_usd_demo" in out.columns:
-        out["demanda_anual_usd_demo"] = out["demanda_anual_usd_demo"].fillna(0).clip(lower=0)
-    if "empleo_local_potencial_demo" in out.columns:
-        out["empleo_local_potencial_demo"] = out["empleo_local_potencial_demo"].fillna(0).clip(lower=0)
-
-    # Recalcular siempre los indicadores derivados.
-    out["captura_local_usd_demo"] = (
-        out["demanda_anual_usd_demo"] * out["participacion_catamarca_pct_demo"] / 100
-    )
-    out["gasto_fuera_catamarca_usd_demo"] = (
-        out["demanda_anual_usd_demo"] - out["captura_local_usd_demo"]
-    )
-    out["puntaje_oportunidad_demo"] = (
-        (1 - out["participacion_catamarca_pct_demo"] / 100) * 45
-        + out["gasto_fuera_catamarca_usd_demo"].clip(lower=10).apply(
-            lambda x: min(1, math.log10(x) / 8)
-        ) * 35
-        + (out["empleo_local_potencial_demo"] / 250).clip(upper=1) * 20
-    ).round()
-    out["prioridad_demo"] = pd.cut(
-        out["puntaje_oportunidad_demo"],
-        bins=[-1, 49, 69, 101],
-        labels=["Consolidar", "Media", "Alta"],
-    ).astype(str)
-    return out
+    manual_ids = st.session_state.get("sipm_manual_employment_ids", [])
+    return engine_prepare_scenario(frame, df, manual_employment_ids=manual_ids)
 
 
 def validate_scenario_file(frame):
@@ -181,53 +118,15 @@ def scenario_kpis(frame):
 
 
 def rebalance_participations(frame, indices):
-    """Reescala las tres participaciones para que sumen 100 manteniendo su relación relativa.
-
-    La conversión explícita a float evita errores de dtype en pandas 3.x
-    cuando una base CSV/Excel trae porcentajes guardados como enteros.
-    """
-    frame = frame.copy()
-
-    cols = [
-        "participacion_catamarca_pct_demo",
-        "participacion_resto_arg_pct_demo",
-        "participacion_importada_pct_demo",
-    ]
-
-    # Conversión defensiva: los porcentajes del escenario deben admitir decimales.
-    for col in cols:
-        frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0).astype(float)
-
-    # Normalizamos los índices para evitar problemas si provienen de filtros,
-    # data_editor o archivos externos.
-    selected_indices = frame.index.intersection(pd.Index(indices))
-
-    if len(selected_indices) == 0:
-        return frame
-
-    values = frame.loc[selected_indices, cols].clip(lower=0).astype(float)
-    totals = values.sum(axis=1)
-    valid = totals > 0
-
-    if valid.any():
-        valid_idx = values.index[valid]
-        normalized = (
-            values.loc[valid_idx]
-            .div(totals.loc[valid_idx], axis=0)
-            .mul(100.0)
-        )
-        # Asignación por columna para mantener dtype float de forma estable
-        # en pandas 3.x.
-        for col in cols:
-            frame.loc[valid_idx, col] = normalized[col].to_numpy(dtype=float)
-
-    if (~valid).any():
-        zero_idx = values.index[~valid]
-        frame.loc[zero_idx, "participacion_catamarca_pct_demo"] = 100.0
-        frame.loc[zero_idx, "participacion_resto_arg_pct_demo"] = 0.0
-        frame.loc[zero_idx, "participacion_importada_pct_demo"] = 0.0
-
-    return frame
+    """Compatibilidad interna. En v2.9 los cambios rápidos usan cierre explícito al 100%."""
+    out = frame.copy()
+    idx = out.index.intersection(pd.Index(indices))
+    if len(idx) == 0:
+        return out
+    sums = out.loc[idx, PARTICIPATION_COLS].sum(axis=1)
+    if not ((sums - 100).abs() <= 1e-6).all():
+        raise ValueError("Las participaciones deben sumar exactamente 100%.")
+    return out
 
 # ------------------------------------------------
 # IDENTIDAD VISUAL
@@ -1126,6 +1025,16 @@ with tabs[7]:
     )
 
     # El escenario vive sólo dentro del Simulador y no altera las demás pestañas.
+    if "sipm_manual_employment_ids" not in st.session_state:
+        st.session_state["sipm_manual_employment_ids"] = []
+    if "sipm_scenario_audit" not in st.session_state:
+        st.session_state["sipm_scenario_audit"] = {
+            "base_calculo": "Base SIPM original",
+            "universo": "Sin modificaciones",
+            "registros": 0,
+            "supuestos": [],
+            "ajustes_modelo": [],
+        }
     if "sipm_scenario_df" not in st.session_state:
         st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
         st.session_state["sipm_scenario_source"] = "Base SIPM"
@@ -1150,19 +1059,55 @@ with tabs[7]:
                     st.error("El archivo no tiene todas las columnas necesarias: " + ", ".join(missing))
                 else:
                     st.success(f"Archivo válido: {len(uploaded_df)} registros detectados.")
+                    use_file_jobs = st.checkbox(
+                        "Usar el empleo del archivo como override manual",
+                        value=False,
+                        key="scenario_file_jobs_override",
+                        help="Desactivado por defecto: el motor recalcula empleo a partir de captura local y estructura sectorial. Activarlo sólo si el archivo contiene una estimación externa de empleo que se desea imponer."
+                    )
                     if st.button("Usar archivo cargado como escenario", type="primary", key="use_uploaded_scenario"):
-                        st.session_state["sipm_scenario_df"] = prepare_scenario_data(uploaded_df)
-                        st.session_state["sipm_scenario_source"] = f"Archivo: {uploaded_scenario.name}"
-                        st.rerun()
+                        try:
+                            # Antes de modelar exigimos que el archivo respete la identidad de participaciones.
+                            p_sums = uploaded_df[PARTICIPATION_COLS].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+                            if not ((p_sums - 100).abs() <= 1e-6).all():
+                                bad = uploaded_df.loc[(p_sums - 100).abs() > 1e-6, "id"].tolist()[:10]
+                                st.error(f"Archivo rechazado: Catamarca + resto Argentina + importado debe sumar 100% en cada fila. IDs: {bad}")
+                            else:
+                                st.session_state["sipm_manual_employment_ids"] = uploaded_df["id"].tolist() if use_file_jobs else []
+                                modeled = engine_prepare_scenario(uploaded_df, df, st.session_state["sipm_manual_employment_ids"])
+                                valid_math, math_errors = validate_scenario_math(modeled)
+                                if not valid_math:
+                                    st.error("Archivo rechazado por inconsistencias matemáticas: " + " | ".join(math_errors))
+                                else:
+                                    st.session_state["sipm_scenario_df"] = modeled
+                                    st.session_state["sipm_scenario_source"] = f"Archivo: {uploaded_scenario.name}"
+                                    st.session_state["sipm_scenario_audit"] = {
+                                        "base_calculo": "Archivo externo comparado contra Base SIPM original",
+                                        "universo": "Matriz cargada",
+                                        "registros": len(modeled),
+                                        "supuestos": ["Valores de entrada tomados del archivo cargado"],
+                                        "ajustes_modelo": ["Empleo manual del archivo" if use_file_jobs else "Empleo recalculado automáticamente"],
+                                    }
+                                    st.rerun()
+                        except Exception as e:
+                            st.error(f"No se pudo construir el escenario: {e}")
             except Exception as e:
                 st.error(f"No se pudo leer el archivo: {e}")
 
     with src2:
         st.markdown(f"**Fuente actual del escenario:**  \n{st.session_state['sipm_scenario_source']}")
-        st.caption("Los cambios quedan en la sesión de la app hasta que se restaure la base o se reinicie la aplicación.")
+        st.caption("El escenario queda en la sesión. Por defecto cada ajuste nuevo parte de la Base SIPM original; la acumulación sólo ocurre si se selecciona expresamente.")
         if st.button("↺ Restaurar escenario base", key="restore_scenario"):
-            st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
+            st.session_state["sipm_manual_employment_ids"] = []
+            st.session_state["sipm_scenario_df"] = engine_prepare_scenario(df.copy(), df, [])
             st.session_state["sipm_scenario_source"] = "Base SIPM"
+            st.session_state["sipm_scenario_audit"] = {
+                "base_calculo": "Base SIPM original",
+                "universo": "Sin modificaciones",
+                "registros": 0,
+                "supuestos": [],
+                "ajustes_modelo": [],
+            }
             st.rerun()
 
     scenario_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
@@ -1227,48 +1172,56 @@ with tabs[7]:
             st.metric("Registros alcanzados", len(scope_indices))
 
         st.markdown("### 3. Ajustes rápidos y combinables")
-        st.caption("Cada modificación es opcional. Podés activar una sola o combinar varias en la misma simulación.")
+        st.caption("Cada cambio es un supuesto de entrada. El motor recalcula automáticamente captura, gasto fuera, empleo, oportunidades, presión de política y capital humano.")
+
+        base_mode = st.radio(
+            "¿Sobre qué base aplicar este ajuste?",
+            ["Base SIPM original", "Escenario actual (acumular deliberadamente)"],
+            index=0,
+            horizontal=True,
+            key="scenario_application_base",
+            help="Por seguridad, cada nuevo ajuste parte de la Base SIPM original. Elegí acumular sólo cuando quieras construir un escenario por etapas."
+        )
 
         q1, q2, q3 = st.columns(3)
         with q1:
             change_demand = st.checkbox("Modificar demanda", key="scenario_change_demand")
             demand_pct = st.number_input(
-                "Variación de demanda (%)",
-                min_value=-100.0, max_value=1000.0, value=0.0, step=5.0,
-                disabled=not change_demand, key="scenario_demand_pct"
+                "Variación de demanda (%)", min_value=-100.0, max_value=1000.0,
+                value=0.0, step=5.0, disabled=not change_demand, key="scenario_demand_pct"
             )
-            change_jobs = st.checkbox("Modificar empleo potencial", key="scenario_change_jobs")
+            manual_jobs = st.checkbox(
+                "Sobrescribir empleo manualmente (avanzado)",
+                value=False,
+                key="scenario_change_jobs",
+                help="Por defecto el empleo es una variable derivada. Activá esto sólo si tenés una estimación externa que deba prevalecer sobre el modelo."
+            )
             jobs_pct = st.number_input(
-                "Variación de empleo (%)",
-                min_value=-100.0, max_value=1000.0, value=0.0, step=5.0,
-                disabled=not change_jobs, key="scenario_jobs_pct"
+                "Variación manual de empleo (%)", min_value=-100.0, max_value=1000.0,
+                value=0.0, step=5.0, disabled=not manual_jobs, key="scenario_jobs_pct"
             )
 
         with q2:
             change_local = st.checkbox("Modificar participación Catamarca", key="scenario_change_local")
             local_pp = st.number_input(
-                "Cambio Catamarca (puntos porcentuales)",
-                min_value=-100.0, max_value=100.0, value=0.0, step=5.0,
-                disabled=not change_local, key="scenario_local_pp"
+                "Cambio Catamarca (puntos porcentuales)", min_value=-100.0, max_value=100.0,
+                value=0.0, step=5.0, disabled=not change_local, key="scenario_local_pp"
             )
             change_rest = st.checkbox("Modificar participación resto Argentina", key="scenario_change_rest")
             rest_pp = st.number_input(
-                "Cambio resto Argentina (p.p.)",
-                min_value=-100.0, max_value=100.0, value=0.0, step=5.0,
-                disabled=not change_rest, key="scenario_rest_pp"
+                "Cambio resto Argentina (p.p.)", min_value=-100.0, max_value=100.0,
+                value=0.0, step=5.0, disabled=not change_rest, key="scenario_rest_pp"
             )
 
         with q3:
             change_imported = st.checkbox("Modificar participación importada", key="scenario_change_imported")
             imported_pp = st.number_input(
-                "Cambio importado (p.p.)",
-                min_value=-100.0, max_value=100.0, value=0.0, step=5.0,
-                disabled=not change_imported, key="scenario_imported_pp"
+                "Cambio importado (p.p.)", min_value=-100.0, max_value=100.0,
+                value=0.0, step=5.0, disabled=not change_imported, key="scenario_imported_pp"
             )
             auto_rebalance = st.checkbox(
-                "Reequilibrar participaciones a 100%",
-                value=True,
-                help="Si se modifican porcentajes, reescala Catamarca / resto Argentina / importado para que la suma final sea 100%.",
+                "Cerrar participaciones automáticamente a 100%", value=True,
+                help="Respeta los porcentajes que modificaste y hace que las columnas no modificadas absorban el residual. Nunca reescala silenciosamente los valores explícitos.",
                 key="scenario_rebalance"
             )
 
@@ -1276,90 +1229,145 @@ with tabs[7]:
         cq1, cq2, cq3, cq4 = st.columns(4)
         with cq1:
             override_criticality = st.checkbox("Cambiar criticidad", key="scenario_override_crit")
-            criticality_value = st.selectbox(
-                "Nueva criticidad",
-                sorted(df["criticidad"].dropna().astype(str).unique()),
-                disabled=not override_criticality,
-                key="scenario_crit_value"
-            )
+            criticality_value = st.selectbox("Nueva criticidad", sorted(df["criticidad"].dropna().astype(str).unique()), disabled=not override_criticality, key="scenario_crit_value")
         with cq2:
             override_complexity = st.checkbox("Cambiar complejidad", key="scenario_override_complex")
-            complexity_value = st.selectbox(
-                "Nueva complejidad",
-                sorted(df["complejidad_tecnica"].dropna().astype(str).unique()),
-                disabled=not override_complexity,
-                key="scenario_complex_value"
-            )
+            complexity_value = st.selectbox("Nueva complejidad", sorted(df["complejidad_tecnica"].dropna().astype(str).unique()), disabled=not override_complexity, key="scenario_complex_value")
         with cq3:
             override_capacity = st.checkbox("Cambiar capacidad local", key="scenario_override_capacity")
-            capacity_value = st.selectbox(
-                "Nueva capacidad",
-                sorted(df["capacidad_local_demo"].dropna().astype(str).unique()),
-                disabled=not override_capacity,
-                key="scenario_capacity_value"
-            )
+            capacity_value = st.selectbox("Nueva capacidad", sorted(df["capacidad_local_demo"].dropna().astype(str).unique()), disabled=not override_capacity, key="scenario_capacity_value")
         with cq4:
             override_frequency = st.checkbox("Cambiar frecuencia", key="scenario_override_frequency")
-            frequency_value = st.selectbox(
-                "Nueva frecuencia",
-                sorted(df["frecuencia"].dropna().astype(str).unique()),
-                disabled=not override_frequency,
-                key="scenario_frequency_value"
-            )
+            frequency_value = st.selectbox("Nueva frecuencia", sorted(df["frecuencia"].dropna().astype(str).unique()), disabled=not override_frequency, key="scenario_frequency_value")
 
         apply_col, info_col = st.columns([1, 2.2])
         with apply_col:
-            apply_quick = st.button("Aplicar ajustes al escenario", type="primary", key="apply_scenario_changes")
+            apply_quick = st.button("Aplicar y validar escenario", type="primary", key="apply_scenario_changes")
         with info_col:
-            st.caption("Los ajustes se acumulan. Podés aplicar una combinación, cambiar el alcance y volver a aplicar otra. 'Restaurar escenario base' elimina todos los cambios.")
+            st.caption("El resultado sólo se guarda si supera las validaciones matemáticas. La opción por defecto vuelve siempre a la Base SIPM original.")
 
         if apply_quick:
             if len(scope_indices) == 0:
                 st.warning("No hay registros seleccionados para modificar.")
             else:
-                work = scenario_df.copy()
-                if change_demand:
-                    work.loc[scope_indices, "demanda_anual_usd_demo"] = (
-                        work.loc[scope_indices, "demanda_anual_usd_demo"] * (1 + demand_pct / 100)
-                    ).clip(lower=0)
-                if change_jobs:
-                    work.loc[scope_indices, "empleo_local_potencial_demo"] = (
-                        work.loc[scope_indices, "empleo_local_potencial_demo"] * (1 + jobs_pct / 100)
-                    ).clip(lower=0)
-                if change_local:
-                    work.loc[scope_indices, "participacion_catamarca_pct_demo"] = (
-                        work.loc[scope_indices, "participacion_catamarca_pct_demo"] + local_pp
-                    ).clip(lower=0, upper=100)
-                if change_rest:
-                    work.loc[scope_indices, "participacion_resto_arg_pct_demo"] = (
-                        work.loc[scope_indices, "participacion_resto_arg_pct_demo"] + rest_pp
-                    ).clip(lower=0, upper=100)
-                if change_imported:
-                    work.loc[scope_indices, "participacion_importada_pct_demo"] = (
-                        work.loc[scope_indices, "participacion_importada_pct_demo"] + imported_pp
-                    ).clip(lower=0, upper=100)
-                if (change_local or change_rest or change_imported) and auto_rebalance:
-                    work = rebalance_participations(work, scope_indices)
-                if override_criticality:
-                    work.loc[scope_indices, "criticidad"] = criticality_value
-                if override_complexity:
-                    work.loc[scope_indices, "complejidad_tecnica"] = complexity_value
-                if override_capacity:
-                    work.loc[scope_indices, "capacidad_local_demo"] = capacity_value
-                if override_frequency:
-                    work.loc[scope_indices, "frecuencia"] = frequency_value
+                try:
+                    # IDs, no posiciones: evita errores si un archivo fue reordenado.
+                    selected_ids = scenario_df.loc[scope_indices, "id"].tolist()
+                    if base_mode == "Base SIPM original":
+                        work = df.copy()
+                        work_indices = work.index[work["id"].isin(selected_ids)]
+                        manual_ids = set()
+                    else:
+                        work = scenario_df.copy()
+                        work_indices = work.index[work["id"].isin(selected_ids)]
+                        manual_ids = set(st.session_state.get("sipm_manual_employment_ids", []))
 
-                st.session_state["sipm_scenario_df"] = prepare_scenario_data(work)
-                st.session_state["sipm_scenario_source"] = st.session_state.get("sipm_scenario_source", "Base SIPM") + " · modificado"
-                st.rerun()
+                    assumptions = []
+                    model_notes = []
+
+                    if change_demand:
+                        before_demand = float(work.loc[work_indices, "demanda_anual_usd_demo"].sum())
+                        work.loc[work_indices, "demanda_anual_usd_demo"] = (
+                            pd.to_numeric(work.loc[work_indices, "demanda_anual_usd_demo"], errors="coerce") * (1 + demand_pct / 100.0)
+                        )
+                        after_input_demand = float(work.loc[work_indices, "demanda_anual_usd_demo"].sum())
+                        expected = before_demand * (1 + demand_pct / 100.0)
+                        if not math.isclose(after_input_demand, expected, rel_tol=1e-12, abs_tol=0.01):
+                            raise ValueError("Falló el control exacto de variación de demanda antes de modelar.")
+                        assumptions.append(f"Demanda: {demand_pct:+.2f}%")
+
+                    deltas = {}
+                    changed_cols = []
+                    if change_local:
+                        deltas["participacion_catamarca_pct_demo"] = local_pp
+                        changed_cols.append("participacion_catamarca_pct_demo")
+                        assumptions.append(f"Participación Catamarca: {local_pp:+.2f} p.p.")
+                    if change_rest:
+                        deltas["participacion_resto_arg_pct_demo"] = rest_pp
+                        changed_cols.append("participacion_resto_arg_pct_demo")
+                        assumptions.append(f"Participación resto Argentina: {rest_pp:+.2f} p.p.")
+                    if change_imported:
+                        deltas["participacion_importada_pct_demo"] = imported_pp
+                        changed_cols.append("participacion_importada_pct_demo")
+                        assumptions.append(f"Participación importada: {imported_pp:+.2f} p.p.")
+                    if changed_cols:
+                        work, participation_notes = apply_participation_deltas(
+                            work, work_indices, deltas, changed_cols, auto_balance=auto_rebalance
+                        )
+                        model_notes.extend(participation_notes)
+                        if auto_rebalance:
+                            untouched = [c for c in PARTICIPATION_COLS if c not in changed_cols]
+                            if untouched:
+                                model_notes.append("El residual para cerrar 100% fue absorbido por: " + ", ".join(untouched))
+
+                    if override_criticality:
+                        work.loc[work_indices, "criticidad"] = criticality_value
+                        assumptions.append(f"Criticidad → {criticality_value}")
+                    if override_complexity:
+                        work.loc[work_indices, "complejidad_tecnica"] = complexity_value
+                        assumptions.append(f"Complejidad → {complexity_value}")
+                    if override_capacity:
+                        work.loc[work_indices, "capacidad_local_demo"] = capacity_value
+                        assumptions.append(f"Capacidad local → {capacity_value}")
+                    if override_frequency:
+                        work.loc[work_indices, "frecuencia"] = frequency_value
+                        assumptions.append(f"Frecuencia → {frequency_value}")
+
+                    if manual_jobs:
+                        # Primero marcamos IDs como override y luego imponemos el valor manual.
+                        manual_ids.update(selected_ids)
+                        work.loc[work_indices, "empleo_local_potencial_demo"] = (
+                            pd.to_numeric(work.loc[work_indices, "empleo_local_potencial_demo"], errors="coerce") * (1 + jobs_pct / 100.0)
+                        ).clip(lower=0)
+                        assumptions.append(f"OVERRIDE manual de empleo: {jobs_pct:+.2f}%")
+                        model_notes.append("El empleo de los registros seleccionados NO fue calculado por el motor porque se activó un override manual.")
+                    else:
+                        # Si partimos de Base, los IDs vuelven al cálculo automático.
+                        if base_mode == "Base SIPM original":
+                            manual_ids.difference_update(selected_ids)
+                        model_notes.append("Empleo recalculado automáticamente desde captura local, elasticidad sectorial y frecuencia.")
+
+                    modeled = engine_prepare_scenario(work, df, manual_ids)
+                    valid_math, math_errors = validate_scenario_math(modeled)
+                    if not valid_math:
+                        raise ValueError(" | ".join(math_errors))
+
+                    # Test adicional del +x% desde base para evitar acumulaciones invisibles.
+                    if change_demand and base_mode == "Base SIPM original":
+                        ok_change, change_detail = exact_demand_change_check(df, selected_ids, demand_pct)
+                        if not ok_change:
+                            raise ValueError("Falló el test de variación exacta de demanda: " + change_detail)
+                        model_notes.append("Control de demanda superado: el % aplicado coincide exactamente con la Base SIPM original.")
+
+                    st.session_state["sipm_manual_employment_ids"] = sorted(manual_ids)
+                    st.session_state["sipm_scenario_df"] = modeled
+                    st.session_state["sipm_scenario_source"] = "Ajuste interno · " + base_mode
+                    scope_text = scope_mode
+                    if scope_mode != "Toda la selección actual":
+                        scope_text += f" · {val if 'val' in locals() else ''}"
+                    st.session_state["sipm_scenario_audit"] = {
+                        "base_calculo": base_mode,
+                        "universo": scope_text,
+                        "registros": len(work_indices),
+                        "supuestos": assumptions if assumptions else ["Sin cambios cuantitativos; sólo cambios cualitativos"],
+                        "ajustes_modelo": model_notes,
+                    }
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"🔴 ESCENARIO INVÁLIDO — no se guardaron cambios. {e}")
 
         st.markdown("### 4. Edición detallada · todas las variables")
         st.markdown(
-            '<div class="drill"><b>Para máxima flexibilidad:</b> esta tabla permite modificar directamente cualquier variable original de los registros seleccionados: '
-            'mineral, eslabonamiento, etapa, sector, actividad, requerimiento, frecuencia, demanda, participaciones, empleo, criticidad, complejidad, '
-            'capacidad, territorio, acciones, barreras, beneficios, certificaciones, cadena de valor, fuente y notas. '
-            'Las variables calculadas se regeneran al guardar.</div>',
+            '<div class="drill"><b>Edición avanzada:</b> podés editar los supuestos originales de los registros. '
+            '<b>Captura local, gasto fuera, puntaje, prioridad y demás salidas nunca se editan:</b> se recalculan. '
+            'El empleo también se calcula automáticamente salvo que actives expresamente el override manual.</div>',
             unsafe_allow_html=True
+        )
+        allow_detail_jobs = st.checkbox(
+            "Permitir override manual de empleo en la tabla",
+            value=False,
+            key="scenario_detail_job_override",
+            help="Usar sólo cuando exista una estimación externa de empleo. Si está desactivado, empleo es una salida del modelo."
         )
 
         raw_edit_cols = [c for c in SCENARIO_REQUIRED_COLUMNS if c in scenario_df.columns]
@@ -1372,7 +1380,7 @@ with tabs[7]:
             num_rows="fixed",
             height=min(520, max(220, 38 * (len(edit_frame) + 1))),
             key="scenario_detail_editor",
-            disabled=["id"] if "id" in raw_edit_cols else False,
+            disabled=(["id"] + ([] if allow_detail_jobs else ["empleo_local_potencial_demo"])) if "id" in raw_edit_cols else ([] if allow_detail_jobs else ["empleo_local_potencial_demo"]),
             column_config={
                 "demanda_anual_usd_demo": st.column_config.NumberColumn("Demanda anual USD", min_value=0.0, format="$ %.0f"),
                 "participacion_catamarca_pct_demo": st.column_config.NumberColumn("% Catamarca", min_value=0.0, max_value=100.0, format="%.1f"),
@@ -1384,24 +1392,43 @@ with tabs[7]:
 
         de1, de2 = st.columns([1, 2.2])
         with de1:
-            save_detail = st.button("Guardar edición detallada", key="save_scenario_detail")
+            save_detail = st.button("Validar y guardar edición detallada", key="save_scenario_detail")
         with de2:
-            rebalance_detail = st.checkbox(
-                "Al guardar, reequilibrar automáticamente los tres porcentajes a 100%",
-                value=True,
-                key="scenario_detail_rebalance"
-            )
+            st.caption("En edición detallada las tres participaciones deben sumar exactamente 100%. Si no cierran, el sistema rechaza el escenario en lugar de corregirlo silenciosamente.")
 
         if save_detail:
-            work = scenario_df.copy()
-            # Conserva el índice original para reemplazar exactamente los registros editados.
-            for col in raw_edit_cols:
-                work.loc[edited_frame.index, col] = edited_frame[col]
-            if rebalance_detail and len(edited_frame.index) > 0:
-                work = rebalance_participations(work, edited_frame.index)
-            st.session_state["sipm_scenario_df"] = prepare_scenario_data(work)
-            st.session_state["sipm_scenario_source"] = st.session_state.get("sipm_scenario_source", "Base SIPM") + " · edición detallada"
-            st.rerun()
+            try:
+                work = scenario_df.copy()
+                for col in raw_edit_cols:
+                    work.loc[edited_frame.index, col] = edited_frame[col]
+                p_sums = work.loc[edited_frame.index, PARTICIPATION_COLS].apply(pd.to_numeric, errors="coerce").sum(axis=1)
+                if not ((p_sums - 100).abs() <= 1e-6).all():
+                    bad = work.loc[edited_frame.index].loc[(p_sums - 100).abs() > 1e-6, "id"].tolist()[:10]
+                    raise ValueError(f"Las participaciones deben sumar 100%. Revisá IDs: {bad}")
+
+                manual_ids = set(st.session_state.get("sipm_manual_employment_ids", []))
+                selected_ids_detail = work.loc[edited_frame.index, "id"].tolist()
+                if allow_detail_jobs:
+                    manual_ids.update(selected_ids_detail)
+                else:
+                    manual_ids.difference_update(selected_ids_detail)
+                modeled = engine_prepare_scenario(work, df, manual_ids)
+                valid_math, math_errors = validate_scenario_math(modeled)
+                if not valid_math:
+                    raise ValueError(" | ".join(math_errors))
+                st.session_state["sipm_manual_employment_ids"] = sorted(manual_ids)
+                st.session_state["sipm_scenario_df"] = modeled
+                st.session_state["sipm_scenario_source"] = "Edición detallada validada"
+                st.session_state["sipm_scenario_audit"] = {
+                    "base_calculo": "Escenario actual · edición detallada",
+                    "universo": f"{len(edited_frame)} registros editados",
+                    "registros": len(edited_frame),
+                    "supuestos": ["Edición fila por fila de variables de entrada"],
+                    "ajustes_modelo": ["Empleo manual" if allow_detail_jobs else "Empleo recalculado automáticamente", "Participaciones verificadas al 100%"],
+                }
+                st.rerun()
+            except Exception as e:
+                st.error(f"🔴 EDICIÓN INVÁLIDA — no se guardaron cambios. {e}")
 
         st.markdown("### 5. Lectura comparativa integral · Base SIPM vs. Escenario")
         scenario_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
@@ -1417,6 +1444,26 @@ with tabs[7]:
 
         base_kpi = scenario_kpis(base_visible)
         sc_kpi = scenario_kpis(scenario_visible)
+
+        # Auditoría matemática y trazabilidad
+        valid_math, math_errors = validate_scenario_math(scenario_df)
+        base_ok, base_errors = baseline_invariance_check(df)
+        audit = st.session_state.get("sipm_scenario_audit", {})
+        st.markdown("#### Auditoría del escenario")
+        a1,a2,a3 = st.columns(3)
+        a1.metric("Base de cálculo", audit.get("base_calculo", "Base SIPM original"))
+        a2.metric("Registros modificados", audit.get("registros", 0))
+        a3.metric("Control matemático", "✓ SUPERADO" if (valid_math and base_ok) else "✕ ERROR")
+        st.markdown(f"**Universo:** {audit.get('universo','Sin modificaciones')}")
+        if audit.get("supuestos"):
+            st.markdown("**Supuestos ingresados:** " + " · ".join(audit["supuestos"]))
+        if audit.get("ajustes_modelo"):
+            st.markdown("**Ajustes/derivaciones del motor:** " + " · ".join(audit["ajustes_modelo"]))
+        if not valid_math or not base_ok:
+            st.error("🔴 ESCENARIO INVÁLIDO. " + " | ".join(math_errors + base_errors))
+            st.stop()
+        else:
+            st.success("✓ Identidades verificadas: participaciones = 100%; captura = demanda × % Catamarca; gasto fuera = demanda − captura; Base SIPM invariante; sin negativos ni valores no finitos.")
 
         # -----------------------------
         # 5.1 Resumen ejecutivo
@@ -1445,6 +1492,18 @@ with tabs[7]:
         k2.metric("Δ captura local", f"{(sc_kpi['captura_pct']-base_kpi['captura_pct'])*100:+.1f} p.p.")
         k3.metric("Δ gasto fuera", f"US$ {(sc_kpi['gasto_fuera']-base_kpi['gasto_fuera'])/1e6:+,.1f} M", delta_color="inverse")
         k4.metric("Δ empleo potencial", f"{sc_kpi['empleo']-base_kpi['empleo']:+,.0f}")
+
+        # Señales derivadas del motor interdependiente
+        if "indice_presion_politica_demo" in scenario_visible.columns:
+            base_modeled_visible = filter_like_sidebar(engine_prepare_scenario(df.copy(), df, []))
+            bp = float(base_modeled_visible["indice_presion_politica_demo"].mean()) if not base_modeled_visible.empty else 0.0
+            sp = float(scenario_visible["indice_presion_politica_demo"].mean()) if not scenario_visible.empty else 0.0
+            bf = float(base_modeled_visible["indice_factibilidad_demo"].mean()) if not base_modeled_visible.empty else 0.0
+            sf = float(scenario_visible["indice_factibilidad_demo"].mean()) if not scenario_visible.empty else 0.0
+            d1,d2 = st.columns(2)
+            d1.metric("Presión de política · promedio", f"{sp:.1f}/100", delta=f"{sp-bp:+.1f}")
+            d2.metric("Factibilidad productiva · promedio", f"{sf:.1f}/100", delta=f"{sf-bf:+.1f}")
+            st.caption("Índices DEMO calibrables: integran demanda, brecha no capturada, capacidad, complejidad, criticidad, importaciones y presión laboral. No son estimaciones causales reales hasta calibrar coeficientes con evidencia.")
 
         # Helper local para comparaciones agregadas.
         def _aggregate_compare(base_frame, scenario_frame, group_col):
