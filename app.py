@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
+from io import BytesIO
 import math
 
 st.set_page_config(
@@ -54,6 +55,145 @@ def load_data():
     return df
 
 df = load_data()
+
+# ------------------------------------------------
+# UTILIDADES PARA ESCENARIOS
+# ------------------------------------------------
+# Columnas originales de la matriz. Las variables calculadas se regeneran
+# automáticamente para evitar inconsistencias al editar o cargar escenarios.
+SCENARIO_DERIVED_COLUMNS = [
+    "captura_local_usd_demo",
+    "gasto_fuera_catamarca_usd_demo",
+    "puntaje_oportunidad_demo",
+    "prioridad_demo",
+]
+
+SCENARIO_REQUIRED_COLUMNS = [
+    c for c in df.columns if c not in SCENARIO_DERIVED_COLUMNS
+]
+
+
+def prepare_scenario_data(frame):
+    """Normaliza y recalcula un DataFrame de escenario sin alterar la base SIPM."""
+    out = frame.copy()
+
+    # Acepta terminología histórica para que archivos anteriores sigan funcionando.
+    if "tipo_eslabonamiento" in out.columns:
+        out["tipo_eslabonamiento"] = (
+            out["tipo_eslabonamiento"]
+            .astype(str)
+            .str.strip()
+            .replace({
+                "Hacia atrás": "Aguas arriba",
+                "Hacia atras": "Aguas arriba",
+                "hacia atrás": "Aguas arriba",
+                "hacia atras": "Aguas arriba",
+                "Aguas Arriba": "Aguas arriba",
+                "aguas arriba": "Aguas arriba",
+                "Hacia adelante": "Aguas abajo",
+                "hacia adelante": "Aguas abajo",
+                "Aguas Abajo": "Aguas abajo",
+                "aguas abajo": "Aguas abajo",
+            })
+        )
+
+    # Variables numéricas críticas: conversión defensiva.
+    numeric_cols = [
+        "demanda_anual_usd_demo",
+        "participacion_catamarca_pct_demo",
+        "participacion_resto_arg_pct_demo",
+        "participacion_importada_pct_demo",
+        "empleo_local_potencial_demo",
+    ]
+    for col in numeric_cols:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    # Límites lógicos para porcentajes y valores que no deberían ser negativos.
+    for col in [
+        "participacion_catamarca_pct_demo",
+        "participacion_resto_arg_pct_demo",
+        "participacion_importada_pct_demo",
+    ]:
+        if col in out.columns:
+            out[col] = out[col].fillna(0).clip(lower=0, upper=100)
+
+    if "demanda_anual_usd_demo" in out.columns:
+        out["demanda_anual_usd_demo"] = out["demanda_anual_usd_demo"].fillna(0).clip(lower=0)
+    if "empleo_local_potencial_demo" in out.columns:
+        out["empleo_local_potencial_demo"] = out["empleo_local_potencial_demo"].fillna(0).clip(lower=0)
+
+    # Recalcular siempre los indicadores derivados.
+    out["captura_local_usd_demo"] = (
+        out["demanda_anual_usd_demo"] * out["participacion_catamarca_pct_demo"] / 100
+    )
+    out["gasto_fuera_catamarca_usd_demo"] = (
+        out["demanda_anual_usd_demo"] - out["captura_local_usd_demo"]
+    )
+    out["puntaje_oportunidad_demo"] = (
+        (1 - out["participacion_catamarca_pct_demo"] / 100) * 45
+        + out["gasto_fuera_catamarca_usd_demo"].clip(lower=10).apply(
+            lambda x: min(1, math.log10(x) / 8)
+        ) * 35
+        + (out["empleo_local_potencial_demo"] / 250).clip(upper=1) * 20
+    ).round()
+    out["prioridad_demo"] = pd.cut(
+        out["puntaje_oportunidad_demo"],
+        bins=[-1, 49, 69, 101],
+        labels=["Consolidar", "Media", "Alta"],
+    ).astype(str)
+    return out
+
+
+def validate_scenario_file(frame):
+    missing = [c for c in SCENARIO_REQUIRED_COLUMNS if c not in frame.columns]
+    if missing:
+        return False, missing
+    return True, []
+
+
+def filter_like_sidebar(frame):
+    """Aplica al escenario exactamente los mismos filtros laterales del tablero."""
+    return frame[
+        frame["mineral"].isin(minerals)
+        & frame["tipo_eslabonamiento"].isin(linkages)
+        & frame["etapa_proyecto"].isin(stages)
+        & frame["territorio_potencial"].isin(territories)
+    ].copy()
+
+
+def scenario_kpis(frame):
+    demand = float(frame["demanda_anual_usd_demo"].sum()) if not frame.empty else 0.0
+    local_value = float(frame["captura_local_usd_demo"].sum()) if not frame.empty else 0.0
+    outside_value = float(frame["gasto_fuera_catamarca_usd_demo"].sum()) if not frame.empty else 0.0
+    employment = float(frame["empleo_local_potencial_demo"].sum()) if not frame.empty else 0.0
+    local_share = local_value / demand if demand else 0.0
+    return {
+        "demanda": demand,
+        "captura_valor": local_value,
+        "captura_pct": local_share,
+        "gasto_fuera": outside_value,
+        "empleo": employment,
+    }
+
+
+def rebalance_participations(frame, indices):
+    """Reescala las tres participaciones para que sumen 100 manteniendo su relación relativa."""
+    cols = [
+        "participacion_catamarca_pct_demo",
+        "participacion_resto_arg_pct_demo",
+        "participacion_importada_pct_demo",
+    ]
+    values = frame.loc[indices, cols].clip(lower=0)
+    totals = values.sum(axis=1)
+    valid = totals > 0
+    if valid.any():
+        frame.loc[values.index[valid], cols] = values.loc[valid].div(totals.loc[valid], axis=0) * 100
+    if (~valid).any():
+        frame.loc[values.index[~valid], "participacion_catamarca_pct_demo"] = 100
+        frame.loc[values.index[~valid], "participacion_resto_arg_pct_demo"] = 0
+        frame.loc[values.index[~valid], "participacion_importada_pct_demo"] = 0
+    return frame
 
 # ------------------------------------------------
 # IDENTIDAD VISUAL
@@ -924,6 +1064,396 @@ with tabs[6]:
         'Sirve para dimensionar una oportunidad y decidir si amerita estudios técnicos, comerciales o de inversión.</div>',
         unsafe_allow_html=True
     )
+
+    st.divider()
+    st.markdown("## Constructor avanzado de escenarios")
+    st.markdown(
+        '<div class="chart-explain"><b>Qué permite:</b> construir escenarios completos sin modificar la base SIPM. '
+        'Podés partir de la matriz actual, cargar un CSV/Excel previamente editado, aplicar cambios masivos combinables '
+        'o editar registros individuales. Luego el sistema recalcula demanda, captura local, gasto externo, empleo y prioridad.</div>',
+        unsafe_allow_html=True
+    )
+
+    # El escenario vive sólo dentro del Simulador y no altera las demás pestañas.
+    if "sipm_scenario_df" not in st.session_state:
+        st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
+        st.session_state["sipm_scenario_source"] = "Base SIPM"
+
+    st.markdown("### 1. Elegir la base del escenario")
+    src1, src2 = st.columns([1.4, 1])
+    with src1:
+        uploaded_scenario = st.file_uploader(
+            "Cargar matriz modificada · CSV o Excel (.xlsx)",
+            type=["csv", "xlsx"],
+            key="scenario_file_uploader",
+            help="El archivo debe conservar las columnas de la matriz SIPM. Las columnas calculadas se regeneran automáticamente."
+        )
+        if uploaded_scenario is not None:
+            try:
+                if uploaded_scenario.name.lower().endswith(".csv"):
+                    uploaded_df = pd.read_csv(uploaded_scenario)
+                else:
+                    uploaded_df = pd.read_excel(uploaded_scenario)
+                ok, missing = validate_scenario_file(uploaded_df)
+                if not ok:
+                    st.error("El archivo no tiene todas las columnas necesarias: " + ", ".join(missing))
+                else:
+                    st.success(f"Archivo válido: {len(uploaded_df)} registros detectados.")
+                    if st.button("Usar archivo cargado como escenario", type="primary", key="use_uploaded_scenario"):
+                        st.session_state["sipm_scenario_df"] = prepare_scenario_data(uploaded_df)
+                        st.session_state["sipm_scenario_source"] = f"Archivo: {uploaded_scenario.name}"
+                        st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo leer el archivo: {e}")
+
+    with src2:
+        st.markdown(f"**Fuente actual del escenario:**  \n{st.session_state['sipm_scenario_source']}")
+        st.caption("Los cambios quedan en la sesión de la app hasta que se restaure la base o se reinicie la aplicación.")
+        if st.button("↺ Restaurar escenario base", key="restore_scenario"):
+            st.session_state["sipm_scenario_df"] = prepare_scenario_data(df.copy())
+            st.session_state["sipm_scenario_source"] = "Base SIPM"
+            st.rerun()
+
+    scenario_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
+
+    st.markdown("### 2. Definir a qué registros aplicar cambios")
+    st.caption("El alcance toma como punto de partida los filtros laterales actuales, pero puede reducirse aún más dentro del escenario.")
+
+    visible_for_scope = filter_like_sidebar(scenario_df)
+    if visible_for_scope.empty:
+        st.warning("El escenario actual no tiene registros compatibles con los filtros laterales seleccionados.")
+    else:
+        sc1, sc2, sc3 = st.columns(3)
+        with sc1:
+            scope_mode = st.selectbox(
+                "Alcance",
+                [
+                    "Toda la selección actual",
+                    "Un mineral",
+                    "Un macrosector",
+                    "Una actividad",
+                    "Un territorio",
+                    "Un eslabonamiento",
+                    "Registros individuales",
+                ],
+                key="scenario_scope_mode"
+            )
+        scope_indices = visible_for_scope.index
+
+        if scope_mode == "Un mineral":
+            with sc2:
+                val = st.selectbox("Mineral", sorted(visible_for_scope["mineral"].dropna().unique()), key="scenario_scope_mineral")
+            scope_indices = visible_for_scope[visible_for_scope["mineral"] == val].index
+        elif scope_mode == "Un macrosector":
+            with sc2:
+                val = st.selectbox("Macrosector", sorted(visible_for_scope["macrosector"].dropna().unique()), key="scenario_scope_sector")
+            scope_indices = visible_for_scope[visible_for_scope["macrosector"] == val].index
+        elif scope_mode == "Una actividad":
+            with sc2:
+                val = st.selectbox("Actividad", sorted(visible_for_scope["actividad"].dropna().unique()), key="scenario_scope_activity")
+            scope_indices = visible_for_scope[visible_for_scope["actividad"] == val].index
+        elif scope_mode == "Un territorio":
+            with sc2:
+                val = st.selectbox("Territorio", sorted(visible_for_scope["territorio_potencial"].dropna().unique()), key="scenario_scope_territory")
+            scope_indices = visible_for_scope[visible_for_scope["territorio_potencial"] == val].index
+        elif scope_mode == "Un eslabonamiento":
+            with sc2:
+                val = st.selectbox("Eslabonamiento", sorted(visible_for_scope["tipo_eslabonamiento"].dropna().unique()), key="scenario_scope_linkage")
+            scope_indices = visible_for_scope[visible_for_scope["tipo_eslabonamiento"] == val].index
+        elif scope_mode == "Registros individuales":
+            choices = visible_for_scope.index.tolist()
+            with sc2:
+                selected_rows = st.multiselect(
+                    "Registros",
+                    choices,
+                    default=choices[:1],
+                    format_func=lambda i: f"{visible_for_scope.loc[i,'mineral']} · {visible_for_scope.loc[i,'macrosector']} · {visible_for_scope.loc[i,'requerimiento_o_producto']}",
+                    key="scenario_scope_rows"
+                )
+            scope_indices = pd.Index(selected_rows)
+
+        with sc3:
+            st.metric("Registros alcanzados", len(scope_indices))
+
+        st.markdown("### 3. Ajustes rápidos y combinables")
+        st.caption("Cada modificación es opcional. Podés activar una sola o combinar varias en la misma simulación.")
+
+        q1, q2, q3 = st.columns(3)
+        with q1:
+            change_demand = st.checkbox("Modificar demanda", key="scenario_change_demand")
+            demand_pct = st.number_input(
+                "Variación de demanda (%)",
+                min_value=-100.0, max_value=1000.0, value=0.0, step=5.0,
+                disabled=not change_demand, key="scenario_demand_pct"
+            )
+            change_jobs = st.checkbox("Modificar empleo potencial", key="scenario_change_jobs")
+            jobs_pct = st.number_input(
+                "Variación de empleo (%)",
+                min_value=-100.0, max_value=1000.0, value=0.0, step=5.0,
+                disabled=not change_jobs, key="scenario_jobs_pct"
+            )
+
+        with q2:
+            change_local = st.checkbox("Modificar participación Catamarca", key="scenario_change_local")
+            local_pp = st.number_input(
+                "Cambio Catamarca (puntos porcentuales)",
+                min_value=-100.0, max_value=100.0, value=0.0, step=5.0,
+                disabled=not change_local, key="scenario_local_pp"
+            )
+            change_rest = st.checkbox("Modificar participación resto Argentina", key="scenario_change_rest")
+            rest_pp = st.number_input(
+                "Cambio resto Argentina (p.p.)",
+                min_value=-100.0, max_value=100.0, value=0.0, step=5.0,
+                disabled=not change_rest, key="scenario_rest_pp"
+            )
+
+        with q3:
+            change_imported = st.checkbox("Modificar participación importada", key="scenario_change_imported")
+            imported_pp = st.number_input(
+                "Cambio importado (p.p.)",
+                min_value=-100.0, max_value=100.0, value=0.0, step=5.0,
+                disabled=not change_imported, key="scenario_imported_pp"
+            )
+            auto_rebalance = st.checkbox(
+                "Reequilibrar participaciones a 100%",
+                value=True,
+                help="Si se modifican porcentajes, reescala Catamarca / resto Argentina / importado para que la suma final sea 100%.",
+                key="scenario_rebalance"
+            )
+
+        st.markdown("#### Cambios cualitativos masivos · opcionales")
+        cq1, cq2, cq3, cq4 = st.columns(4)
+        with cq1:
+            override_criticality = st.checkbox("Cambiar criticidad", key="scenario_override_crit")
+            criticality_value = st.selectbox(
+                "Nueva criticidad",
+                sorted(df["criticidad"].dropna().astype(str).unique()),
+                disabled=not override_criticality,
+                key="scenario_crit_value"
+            )
+        with cq2:
+            override_complexity = st.checkbox("Cambiar complejidad", key="scenario_override_complex")
+            complexity_value = st.selectbox(
+                "Nueva complejidad",
+                sorted(df["complejidad_tecnica"].dropna().astype(str).unique()),
+                disabled=not override_complexity,
+                key="scenario_complex_value"
+            )
+        with cq3:
+            override_capacity = st.checkbox("Cambiar capacidad local", key="scenario_override_capacity")
+            capacity_value = st.selectbox(
+                "Nueva capacidad",
+                sorted(df["capacidad_local_demo"].dropna().astype(str).unique()),
+                disabled=not override_capacity,
+                key="scenario_capacity_value"
+            )
+        with cq4:
+            override_frequency = st.checkbox("Cambiar frecuencia", key="scenario_override_frequency")
+            frequency_value = st.selectbox(
+                "Nueva frecuencia",
+                sorted(df["frecuencia"].dropna().astype(str).unique()),
+                disabled=not override_frequency,
+                key="scenario_frequency_value"
+            )
+
+        apply_col, info_col = st.columns([1, 2.2])
+        with apply_col:
+            apply_quick = st.button("Aplicar ajustes al escenario", type="primary", key="apply_scenario_changes")
+        with info_col:
+            st.caption("Los ajustes se acumulan. Podés aplicar una combinación, cambiar el alcance y volver a aplicar otra. 'Restaurar escenario base' elimina todos los cambios.")
+
+        if apply_quick:
+            if len(scope_indices) == 0:
+                st.warning("No hay registros seleccionados para modificar.")
+            else:
+                work = scenario_df.copy()
+                if change_demand:
+                    work.loc[scope_indices, "demanda_anual_usd_demo"] = (
+                        work.loc[scope_indices, "demanda_anual_usd_demo"] * (1 + demand_pct / 100)
+                    ).clip(lower=0)
+                if change_jobs:
+                    work.loc[scope_indices, "empleo_local_potencial_demo"] = (
+                        work.loc[scope_indices, "empleo_local_potencial_demo"] * (1 + jobs_pct / 100)
+                    ).clip(lower=0)
+                if change_local:
+                    work.loc[scope_indices, "participacion_catamarca_pct_demo"] = (
+                        work.loc[scope_indices, "participacion_catamarca_pct_demo"] + local_pp
+                    ).clip(lower=0, upper=100)
+                if change_rest:
+                    work.loc[scope_indices, "participacion_resto_arg_pct_demo"] = (
+                        work.loc[scope_indices, "participacion_resto_arg_pct_demo"] + rest_pp
+                    ).clip(lower=0, upper=100)
+                if change_imported:
+                    work.loc[scope_indices, "participacion_importada_pct_demo"] = (
+                        work.loc[scope_indices, "participacion_importada_pct_demo"] + imported_pp
+                    ).clip(lower=0, upper=100)
+                if (change_local or change_rest or change_imported) and auto_rebalance:
+                    work = rebalance_participations(work, scope_indices)
+                if override_criticality:
+                    work.loc[scope_indices, "criticidad"] = criticality_value
+                if override_complexity:
+                    work.loc[scope_indices, "complejidad_tecnica"] = complexity_value
+                if override_capacity:
+                    work.loc[scope_indices, "capacidad_local_demo"] = capacity_value
+                if override_frequency:
+                    work.loc[scope_indices, "frecuencia"] = frequency_value
+
+                st.session_state["sipm_scenario_df"] = prepare_scenario_data(work)
+                st.session_state["sipm_scenario_source"] = st.session_state.get("sipm_scenario_source", "Base SIPM") + " · modificado"
+                st.rerun()
+
+        st.markdown("### 4. Edición detallada · todas las variables")
+        st.markdown(
+            '<div class="drill"><b>Para máxima flexibilidad:</b> esta tabla permite modificar directamente cualquier variable original de los registros seleccionados: '
+            'mineral, eslabonamiento, etapa, sector, actividad, requerimiento, frecuencia, demanda, participaciones, empleo, criticidad, complejidad, '
+            'capacidad, territorio, acciones, barreras, beneficios, certificaciones, cadena de valor, fuente y notas. '
+            'Las variables calculadas se regeneran al guardar.</div>',
+            unsafe_allow_html=True
+        )
+
+        raw_edit_cols = [c for c in SCENARIO_REQUIRED_COLUMNS if c in scenario_df.columns]
+        edit_frame = scenario_df.loc[scope_indices, raw_edit_cols].copy()
+
+        edited_frame = st.data_editor(
+            edit_frame,
+            use_container_width=True,
+            hide_index=False,
+            num_rows="fixed",
+            height=min(520, max(220, 38 * (len(edit_frame) + 1))),
+            key="scenario_detail_editor",
+            disabled=["id"] if "id" in raw_edit_cols else False,
+            column_config={
+                "demanda_anual_usd_demo": st.column_config.NumberColumn("Demanda anual USD", min_value=0.0, format="$ %.0f"),
+                "participacion_catamarca_pct_demo": st.column_config.NumberColumn("% Catamarca", min_value=0.0, max_value=100.0, format="%.1f"),
+                "participacion_resto_arg_pct_demo": st.column_config.NumberColumn("% resto Argentina", min_value=0.0, max_value=100.0, format="%.1f"),
+                "participacion_importada_pct_demo": st.column_config.NumberColumn("% importado", min_value=0.0, max_value=100.0, format="%.1f"),
+                "empleo_local_potencial_demo": st.column_config.NumberColumn("Empleo potencial", min_value=0.0, format="%.0f"),
+            }
+        )
+
+        de1, de2 = st.columns([1, 2.2])
+        with de1:
+            save_detail = st.button("Guardar edición detallada", key="save_scenario_detail")
+        with de2:
+            rebalance_detail = st.checkbox(
+                "Al guardar, reequilibrar automáticamente los tres porcentajes a 100%",
+                value=True,
+                key="scenario_detail_rebalance"
+            )
+
+        if save_detail:
+            work = scenario_df.copy()
+            # Conserva el índice original para reemplazar exactamente los registros editados.
+            for col in raw_edit_cols:
+                work.loc[edited_frame.index, col] = edited_frame[col]
+            if rebalance_detail and len(edited_frame.index) > 0:
+                work = rebalance_participations(work, edited_frame.index)
+            st.session_state["sipm_scenario_df"] = prepare_scenario_data(work)
+            st.session_state["sipm_scenario_source"] = st.session_state.get("sipm_scenario_source", "Base SIPM") + " · edición detallada"
+            st.rerun()
+
+        st.markdown("### 5. Resultado del escenario · comparación con la base")
+        scenario_df = prepare_scenario_data(st.session_state["sipm_scenario_df"])
+        scenario_visible = filter_like_sidebar(scenario_df)
+        base_visible = f.copy()
+
+        base_kpi = scenario_kpis(base_visible)
+        sc_kpi = scenario_kpis(scenario_visible)
+
+        st.markdown(
+            '<div class="sipm-note"><b>ESCENARIO SIMULADO:</b> los resultados siguientes pueden contener datos cargados o modificaciones realizadas durante la sesión. '
+            'No reemplazan la base SIPM ni deben interpretarse como resultados observados.</div>',
+            unsafe_allow_html=True
+        )
+
+        rk1, rk2, rk3, rk4 = st.columns(4)
+        rk1.metric(
+            "Demanda mapeada",
+            f"US$ {sc_kpi['demanda']/1e6:,.1f} M",
+            f"{(sc_kpi['demanda']-base_kpi['demanda'])/1e6:+,.1f} M vs base"
+        )
+        rk2.metric(
+            "Captura local",
+            f"{sc_kpi['captura_pct']:.1%}",
+            f"{(sc_kpi['captura_pct']-base_kpi['captura_pct'])*100:+.1f} p.p."
+        )
+        rk3.metric(
+            "Gasto fuera de Catamarca",
+            f"US$ {sc_kpi['gasto_fuera']/1e6:,.1f} M",
+            f"{(sc_kpi['gasto_fuera']-base_kpi['gasto_fuera'])/1e6:+,.1f} M vs base",
+            delta_color="inverse"
+        )
+        rk4.metric(
+            "Empleo potencial",
+            f"{sc_kpi['empleo']:,.0f}",
+            f"{sc_kpi['empleo']-base_kpi['empleo']:+,.0f} vs base"
+        )
+
+        comparison = pd.DataFrame({
+            "Indicador": ["Demanda", "Captura local USD", "Gasto fuera", "Empleo potencial"],
+            "Base": [base_kpi["demanda"], base_kpi["captura_valor"], base_kpi["gasto_fuera"], base_kpi["empleo"]],
+            "Escenario": [sc_kpi["demanda"], sc_kpi["captura_valor"], sc_kpi["gasto_fuera"], sc_kpi["empleo"]],
+        })
+        comparison_long = comparison.melt(id_vars="Indicador", var_name="Situación", value_name="Valor")
+        fig_sc = px.bar(
+            comparison_long,
+            x="Indicador", y="Valor", color="Situación", barmode="group",
+            color_discrete_map={"Base":"#AEBCC4", "Escenario":"#2A6F8E"},
+            labels={"Valor":"Valor comparativo", "Indicador":""}
+        )
+        fig_sc.update_layout(height=420, margin=dict(t=15,l=0,r=10,b=10))
+        st.plotly_chart(fig_sc, use_container_width=True)
+        st.caption("El gráfico compara magnitudes de distinta unidad sólo para visualizar dirección y tamaño relativo del cambio. Los indicadores superiores son la lectura principal.")
+
+        # Cambios por registro usando ID cuando está disponible.
+        if "id" in df.columns and "id" in scenario_df.columns:
+            base_compare = df.set_index("id")
+            sc_compare = scenario_df.set_index("id")
+            common_ids = base_compare.index.intersection(sc_compare.index)
+            changes = pd.DataFrame(index=common_ids)
+            changes["mineral"] = sc_compare.loc[common_ids, "mineral"]
+            changes["macrosector"] = sc_compare.loc[common_ids, "macrosector"]
+            changes["actividad"] = sc_compare.loc[common_ids, "actividad"]
+            changes["requerimiento"] = sc_compare.loc[common_ids, "requerimiento_o_producto"]
+            changes["Δ demanda USD"] = sc_compare.loc[common_ids, "demanda_anual_usd_demo"] - base_compare.loc[common_ids, "demanda_anual_usd_demo"]
+            changes["Δ Catamarca p.p."] = sc_compare.loc[common_ids, "participacion_catamarca_pct_demo"] - base_compare.loc[common_ids, "participacion_catamarca_pct_demo"]
+            changes["Δ empleo"] = sc_compare.loc[common_ids, "empleo_local_potencial_demo"] - base_compare.loc[common_ids, "empleo_local_potencial_demo"]
+            changes["magnitud_cambio"] = (
+                changes["Δ demanda USD"].abs() / 1e6
+                + changes["Δ Catamarca p.p."].abs()
+                + changes["Δ empleo"].abs()
+            )
+            changed = changes[changes["magnitud_cambio"] > 0].sort_values("magnitud_cambio", ascending=False).drop(columns="magnitud_cambio")
+            if not changed.empty:
+                st.markdown("#### Registros con mayores cambios cuantitativos")
+                st.dataframe(changed.head(20), use_container_width=True)
+            else:
+                st.caption("Todavía no hay cambios cuantitativos respecto de la base SIPM.")
+
+        st.markdown("### 6. Guardar el escenario para reutilizarlo")
+        dl1, dl2 = st.columns(2)
+        with dl1:
+            st.download_button(
+                "Descargar escenario CSV",
+                scenario_df.to_csv(index=False).encode("utf-8-sig"),
+                "sipm_escenario.csv",
+                "text/csv",
+                key="download_scenario_csv"
+            )
+        with dl2:
+            excel_buffer = BytesIO()
+            try:
+                with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+                    scenario_df.to_excel(writer, index=False, sheet_name="Escenario SIPM")
+                st.download_button(
+                    "Descargar escenario Excel",
+                    excel_buffer.getvalue(),
+                    "sipm_escenario.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_scenario_xlsx"
+                )
+            except Exception:
+                st.caption("Para exportar Excel, agregá openpyxl a requirements.txt. La descarga CSV funciona igualmente.")
 
 
 # ------------------------------------------------
