@@ -283,67 +283,60 @@ def apply_participation_deltas(
     changed_columns: Sequence[str],
     auto_balance: bool = True,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """Aplica cambios en p.p. con cierre exacto al 100% y trazabilidad.
+    """Cierra participaciones al 100% incluso ante shocks incompatibles.
 
-    Los valores explícitos se respetan hasta los límites [0,100]. Si quedan
-    columnas sin modificar, absorben el residual proporcionalmente a su peso
-    previo. Si las tres columnas fueron modificadas y no suman 100, se rechaza.
+    Prioridad: aplicar los cambios explícitos (limitados a 0..100), asignar
+    el residual a columnas no editadas; si no hay suficiente espacio,
+    normalizar las columnas explícitas proporcionalmente. Nunca inventa
+    participaciones negativas. Documenta cada corrección necesaria.
     """
     out = frame.copy()
     idx = out.index.intersection(pd.Index(indices))
     notes: List[str] = []
     changed = [c for c in changed_columns if c in PARTICIPATION_COLS]
     untouched = [c for c in PARTICIPATION_COLS if c not in changed]
-
     if len(idx) == 0 or not changed:
         return out, notes
-
     for c in PARTICIPATION_COLS:
-        out[c] = _numeric(out[c])
-
+        out[c] = _numeric(out[c]).astype(float)
     for i in idx:
         before = out.loc[i, PARTICIPATION_COLS].astype(float).copy()
         vals = before.copy()
         for c in changed:
-            raw = vals[c] + float(deltas.get(c, 0.0))
-            clipped = min(100.0, max(0.0, raw))
-            if abs(clipped - raw) > 1e-9:
-                notes.append(f"ID {out.at[i,'id']}: {c} alcanzó el límite {'0%' if raw < 0 else '100%'}.")
-            vals[c] = clipped
-
-        if not auto_balance:
-            if abs(vals.sum() - 100.0) > 1e-7:
-                raise ValueError(
-                    f"ID {out.at[i,'id']}: las participaciones suman {vals.sum():.4f}% y deben sumar 100%."
-                )
+            requested = float(before[c]) + float(deltas.get(c, 0.0))
+            vals[c] = min(100.0, max(0.0, requested))
+            if abs(vals[c] - requested) > 1e-8:
+                notes.append(f"ID {out.at[i,'id']}: {c} limitado al rango 0–100%.")
+        explicit_sum = float(vals[changed].sum())
+        if explicit_sum > 100.0 + 1e-9:
+            vals[changed] = vals[changed] * (100.0 / explicit_sum)
+            vals[untouched] = 0.0
+            notes.append(f"ID {out.at[i,'id']}: cambios solicitados excedían 100%; se ajustaron proporcionalmente las participaciones modificadas.")
+        elif untouched:
+            remainder = max(0.0, 100.0 - explicit_sum)
+            original = before[untouched].clip(lower=0.0)
+            total = float(original.sum())
+            if total > 1e-12:
+                vals[untouched] = original * (remainder / total)
+            else:
+                vals[untouched] = remainder / len(untouched)
+            if not auto_balance and abs(float(vals.sum()) - float(before.sum())) > 1e-7:
+                notes.append(f"ID {out.at[i,'id']}: cierre automático de seguridad aplicado.")
         else:
-            explicit_sum = float(vals[changed].sum())
-            residual = 100.0 - explicit_sum
-            if residual < -1e-7:
-                raise ValueError(
-                    f"ID {out.at[i,'id']}: las participaciones modificadas por sí solas superan 100%."
-                )
-            if untouched:
-                old_untouched = before[untouched].clip(lower=0)
-                denom = float(old_untouched.sum())
-                if denom > 0:
-                    vals[untouched] = old_untouched / denom * max(0.0, residual)
-                else:
-                    vals[untouched] = max(0.0, residual) / len(untouched)
-            elif abs(residual) > 1e-7:
-                raise ValueError(
-                    f"ID {out.at[i,'id']}: modificaste las tres participaciones y el resultado suma {explicit_sum:.4f}%. "
-                    "Ajustá los cambios para que sumen exactamente 100%."
-                )
-
-        # Corrección de redondeo en la última columna no explícita (o en resto Argentina si todas son explícitas).
-        diff = 100.0 - float(vals.sum())
-        target_col = untouched[-1] if untouched else "participacion_resto_arg_pct_demo"
-        vals[target_col] += diff
-        if (vals < -1e-7).any() or (vals > 100.0000001).any():
-            raise ValueError(f"ID {out.at[i,'id']}: el reequilibrio genera una participación fuera de rango.")
-        out.loc[i, PARTICIPATION_COLS] = vals.values.astype(float)
-
+            if explicit_sum > 1e-12:
+                vals[changed] = vals[changed] * (100.0 / explicit_sum)
+            else:
+                vals[changed] = 100.0 / len(changed)
+            if abs(explicit_sum - 100.0) > 1e-7:
+                notes.append(f"ID {out.at[i,'id']}: tres participaciones editadas; normalizadas proporcionalmente al 100%.")
+        vals = vals.clip(lower=0.0, upper=100.0)
+        correction = 100.0 - float(vals.sum())
+        target = untouched[-1] if untouched else changed[-1]
+        vals[target] += correction
+        vals = vals.clip(lower=0.0, upper=100.0)
+        if (vals < -1e-7).any() or (vals > 100.0000001).any() or abs(float(vals.sum())-100)>1e-7:
+            raise ValueError(f"ID {out.at[i,'id']}: cierre de participaciones fallido.")
+        out.loc[i, PARTICIPATION_COLS] = vals.to_numpy(dtype=float)
     return out, notes
 
 
