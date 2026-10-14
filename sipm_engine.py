@@ -396,3 +396,4 @@ def exact_demand_change_check(base_reference: pd.DataFrame, ids: Sequence, pct: 
     expected = before * (1 + pct / 100.0)
     ok = math.isclose(after, expected, rel_tol=1e-12, abs_tol=0.01)
     return ok, f"Base={before:.6f}; esperado={expected:.6f}; obtenido={after:.6f}"
+
