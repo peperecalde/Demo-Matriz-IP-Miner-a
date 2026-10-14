@@ -1912,20 +1912,105 @@ with tabs[7]:
         elif delta_d < 0:
             st.warning("La demanda total disminuye: evaluar riesgos sobre actividad, proveedores y empleo.")
 
-        st.markdown("##### Índices estratégicos: cómo interpretarlos")
-        st.write(
-            "**Presión de política pública (0–100):** índice sintético de brechas y exigencias "
-            "de intervención; no representa porcentaje de presupuesto ni probabilidad. "
-            "**Factibilidad productiva (0–100):** indicador de cribado basado principalmente "
-            "en capacidad local y complejidad; no representa probabilidad de éxito. "
-            "Si no se modifican esos determinantes, puede permanecer constante aunque crezcan "
-            "la demanda y la captura deseada."
+        st.markdown("##### Índices estratégicos: interpretación para la toma de decisiones")
+        st.caption(
+            "Ambos son índices compuestos DEMO de 0 a 100, no porcentajes, probabilidades "
+            "ni pronósticos. Sus ponderadores y escalas requieren calibración con evidencia real."
         )
+        if "indice_presion_politica_demo" in scenario_visible.columns and not scenario_visible.empty:
+            base_index_rows = filter_like_sidebar(engine_prepare_scenario(df.copy(), df, []))
+            pressure_base = float(base_index_rows["indice_presion_politica_demo"].mean()) if not base_index_rows.empty else 0.0
+            pressure_scenario = float(scenario_visible["indice_presion_politica_demo"].mean())
+            feasibility_base = float(base_index_rows["indice_factibilidad_demo"].mean()) if not base_index_rows.empty else 0.0
+            feasibility_scenario = float(scenario_visible["indice_factibilidad_demo"].mean())
+            dp = pressure_scenario - pressure_base
+            dfact = feasibility_scenario - feasibility_base
+            cp, cf = st.columns(2)
+            cp.metric("Presión de política pública", f"{pressure_scenario:.1f}/100", f"{dp:+.1f} puntos")
+            cf.metric("Factibilidad productiva", f"{feasibility_scenario:.1f}/100", f"{dfact:+.1f} puntos")
+
+            st.markdown("**1. Presión de política pública: ¿qué preparación exige el escenario?**")
+            st.write(
+                "Resume señales de mercado no capturado, crecimiento de demanda, brechas de capacidad, "
+                "complejidad, criticidad, dependencia importada y presión laboral. "
+                "Una suba sugiere **mayor necesidad relativa de preparación institucional, empresarial "
+                "y laboral**: coordinación entre organismos, fortalecimiento de proveedores, "
+                "anticipación de formación y seguimiento de cuellos de botella. "
+                "Una baja sugiere menor presión relativa bajo los supuestos utilizados; "
+                "**no demuestra** que las políticas existentes sean suficientes."
+            )
+            if dp > 0.05:
+                st.info(
+                    f"**Lectura de este escenario:** la presión sube {dp:.1f} puntos "
+                    f"(de {pressure_base:.1f} a {pressure_scenario:.1f}). "
+                    "El modelo señala mayor exigencia de preparación: conviene identificar "
+                    "los sectores y perfiles que explican el cambio y acordar responsables y plazos."
+                )
+            elif dp < -0.05:
+                st.info(
+                    f"**Lectura de este escenario:** la presión baja {abs(dp):.1f} puntos "
+                    f"(de {pressure_base:.1f} a {pressure_scenario:.1f}). "
+                    "Esto indica menor presión relativa según el modelo; revisar qué brechas "
+                    "se redujeron antes de reorientar recursos."
+                )
+            else:
+                st.info(
+                    f"**Lectura de este escenario:** la presión permanece prácticamente estable "
+                    f"({pressure_base:.1f} → {pressure_scenario:.1f}). "
+                    "Los cambios simulados no alteran materialmente este índice agregado; "
+                    "puede haber variaciones contrapuestas entre actividades."
+                )
+
+            st.markdown("**2. Factibilidad productiva: ¿qué capacidad existe para responder?**")
+            st.write(
+                "Es un indicador de **preparación productiva relativa**, construido en esta DEMO "
+                "principalmente con capacidad local y complejidad técnica. Un valor mayor sugiere "
+                "condiciones más favorables para abastecer; uno menor, mayores obstáculos técnicos "
+                "o de capacidad. **No equivale a un  porcentaje de posibilidades de éxito**, "
+                "ni certifica que la participación local objetivo sea alcanzable."
+            )
+            if dfact > 0.05:
+                st.info(
+                    f"**Lectura de este escenario:** la factibilidad mejora {dfact:.1f} puntos "
+                    f"(de {feasibility_base:.1f} a {feasibility_scenario:.1f}). "
+                    "El modelo supone una mejora en las condiciones productivas; verificar "
+                    "qué inversiones, certificaciones o capacidades justifican ese cambio."
+                )
+            elif dfact < -0.05:
+                st.warning(
+                    f"**Lectura de este escenario:** la factibilidad disminuye {abs(dfact):.1f} puntos "
+                    f"(de {feasibility_base:.1f} a {feasibility_scenario:.1f}). "
+                    "Podría requerirse mayor esfuerzo en tecnología, financiamiento, "
+                    "capacitación o infraestructura antes de exigir mayor captura local."
+                )
+            else:
+                st.info(
+                    f"**Lectura de este escenario:** la factibilidad permanece estable "
+                    f"({feasibility_base:.1f} → {feasibility_scenario:.1f}). "
+                    "Si aumentaste demanda o participación de Catamarca sin modificar capacidad "
+                    "o complejidad, **el modelo no está demostrando que las empresas puedan atender "
+                    "la nueva demanda**: sólo conserva su diagnóstico de preparación."
+                )
+
+            st.markdown("**3. Lectura conjunta: de los índices a una agenda de acción**")
+            st.dataframe(pd.DataFrame([
+                ["Presión sube · Factibilidad baja o no mejora", "La demanda de intervención aumenta sin evidencia de mayor capacidad.", "Diagnóstico de brechas, proveedores, inversión, formación y cronograma."],
+                ["Presión sube · Factibilidad mejora", "Hay mayor exigencia, pero también mejores condiciones para responder.", "Priorizar oportunidades verificables y coordinar compras y capacitación."],
+                ["Presión baja · Factibilidad mejora", "Menor presión relativa y mejores condiciones productivas.", "Consolidar capacidades, medir resultados y escalar donde haya mercado."],
+                ["Presión baja · Factibilidad baja", "Menor presión no implica que se hayan resuelto los obstáculos estructurales.", "Monitorear brechas y evitar inversiones sin demanda validada."],
+            ], columns=["Combinación ilustrativa", "Qué sugiere", "Decisión a evaluar"]),
+                use_container_width=True, hide_index=True)
+            st.caption(
+                "Las combinaciones son guías cualitativas, no umbrales estadísticos validados. "
+                "Los promedios pueden ocultar situaciones sectoriales o territoriales opuestas: "
+                "consultá las tablas por actividad y territorio antes de decidir."
+            )
         st.warning(
-            "**Brecha de factibilidad:** aumentar la participación catamarqueña es un supuesto, "
-            "no una demostración de que las empresas puedan abastecer esa cuota. "
-            "Se requiere validar capacidad instalada, certificaciones, financiamiento, "
-            "tecnología y plazos antes de ejecutar políticas."
+            "**Límite metodológico:** la presión de política no mide gasto público necesario, "
+            "y la factibilidad no mide probabilidad de éxito. Ninguno reemplaza estudios de "
+            "capacidad instalada, demanda, costos, certificaciones, productividad, infraestructura "
+            "o prefactibilidad. Antes de adoptar decisiones reales deben calibrarse elasticidades, "
+            "ponderadores y escalas, y documentarse su sensibilidad."
         )
 
         st.markdown("##### Consecuencias por dimensión y decisiones posibles")
