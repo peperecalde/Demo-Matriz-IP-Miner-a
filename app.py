@@ -1854,6 +1854,186 @@ with tabs[7]:
             unsafe_allow_html=True
         )
 
+        # ------------------------------------------------------------
+        # 5.9 CONSECUENCIAS PARA CATAMARCA · INTERPRETACIÓN Y ACCIÓN
+        # Sólo lectura: no modifica el motor ni la Base SIPM.
+        # ------------------------------------------------------------
+        st.markdown("#### 5.9 Consecuencias del escenario para Catamarca")
+        st.info(
+            "LECTURA DEMOSTRATIVA: los montos se calculan con la matriz cargada. "
+            "Las elasticidades laborales, ponderadores, índices y reglas de recomendación "
+            "todavía no están calibrados con evidencia real. No son pronósticos ni empleos garantizados."
+        )
+
+        def _usd_m(value):
+            return f"US$ {value / 1e6:+,.1f} M"
+
+        delta_d = sc_kpi["demanda"] - base_kpi["demanda"]
+        delta_l = sc_kpi["captura_valor"] - base_kpi["captura_valor"]
+        delta_o = sc_kpi["gasto_fuera"] - base_kpi["gasto_fuera"]
+        delta_e = sc_kpi["empleo"] - base_kpi["empleo"]
+        pp = (sc_kpi["captura_pct"] - base_kpi["captura_pct"]) * 100
+        delta_total = delta_d
+        share_increment = delta_l / delta_total * 100 if abs(delta_total) > 1e-9 else None
+
+        st.markdown("##### Qué significa cada resultado")
+        explanations = [
+            ("Demanda mapeada", _usd_m(delta_d),
+             "Cambio del volumen económico total asociado a las actividades seleccionadas. "
+             "No equivale a ingresos fiscales ni a valor agregado provincial."),
+            ("Captura local", _usd_m(delta_l),
+             f"Cambio del gasto asignado a Catamarca. La participación agregada varió {pp:+.1f} puntos porcentuales. "
+             "Es una aproximación de compras locales, no de valor agregado neto."),
+            ("Gasto fuera de Catamarca", _usd_m(delta_o),
+             "Cambio de compras al resto del país y al exterior. Puede aumentar aunque crezca la participación local, "
+             "si la demanda total aumenta lo suficiente."),
+            ("Empleo potencial", f"{delta_e:+,.0f}",
+             "Variación calculada por elasticidades sectoriales DEMO sobre captura local. "
+             "No representa vacantes confirmadas ni puestos nuevos garantizados."),
+        ]
+        for label, value, explanation in explanations:
+            st.markdown(f"**{label}: {value}**")
+            st.caption(explanation)
+
+        if share_increment is not None and delta_total > 0:
+            st.write(
+                f"**Lectura del crecimiento:** por cada US$ 100 adicionales de demanda, "
+                f"el modelo asigna aproximadamente US$ {share_increment:.1f} de cambio en captura local "
+                f"y US$ {100-share_increment:.1f} de cambio en compras externas. "
+                "Son participaciones del incremento, no de la demanda total; pueden ser negativas "
+                "o superar 100 si existe sustitución entre orígenes."
+            )
+        if delta_d > 0 and delta_o > 0:
+            st.warning("La demanda y la captura local crecen, pero también aumenta el gasto externo: "
+                       "conviene identificar los rubros con mayor fuga incremental.")
+        elif delta_d > 0 and delta_o < 0:
+            st.success("La demanda crece mientras el gasto externo cae: el aumento de captura local "
+                       "compensa más que proporcionalmente el crecimiento de la demanda.")
+        elif delta_d < 0:
+            st.warning("La demanda total disminuye: evaluar riesgos sobre actividad, proveedores y empleo.")
+
+        st.markdown("##### Índices estratégicos: cómo interpretarlos")
+        st.write(
+            "**Presión de política pública (0–100):** índice sintético de brechas y exigencias "
+            "de intervención; no representa porcentaje de presupuesto ni probabilidad. "
+            "**Factibilidad productiva (0–100):** indicador de cribado basado principalmente "
+            "en capacidad local y complejidad; no representa probabilidad de éxito. "
+            "Si no se modifican esos determinantes, puede permanecer constante aunque crezcan "
+            "la demanda y la captura deseada."
+        )
+        st.warning(
+            "**Brecha de factibilidad:** aumentar la participación catamarqueña es un supuesto, "
+            "no una demostración de que las empresas puedan abastecer esa cuota. "
+            "Se requiere validar capacidad instalada, certificaciones, financiamiento, "
+            "tecnología y plazos antes de ejecutar políticas."
+        )
+
+        st.markdown("##### Consecuencias por dimensión y decisiones posibles")
+        consequences = [
+            ("Económica", "Variación de demanda, captura local y compras externas",
+             "Revisar categorías con crecimiento de gasto fuera y oportunidades de sustitución.",
+             "Minería · Producción · Cámaras", "Corto / mediano"),
+            ("Productiva", "Mayor captura local requiere capacidad de provisión verificable",
+             "Relevar proveedores, capacidad ociosa, homologaciones, inversión y acceso a compras.",
+             "Producción · Empresas · Cámaras", "Corto / mediano"),
+            ("Laboral", "Cambio en empleo potencial según elasticidades DEMO",
+             "Contrastar perfiles y dotaciones con encuestas a empresas antes de fijar metas.",
+             "Trabajo · Empresas · Cámaras", "Corto / mediano"),
+            ("Educativa", "Presión sobre perfiles técnicos y profesionales derivada del empleo",
+             "Cruzar demanda ocupacional con oferta, egresados, formación y prácticas.",
+             "Educación · UNCA · Institutos", "Mediano / largo"),
+            ("Territorial", "Cambios concentrados en territorios según registros afectados",
+             "Evaluar logística, energía, vivienda, conectividad y capacidad de servicios.",
+             "Municipios · Infraestructura · Minería", "Mediano"),
+            ("Institucional", "Necesidad de coordinación y seguimiento de brechas",
+             "Definir agenda de intervención, responsables, plazos e indicadores verificables.",
+             "Provincia · Cámaras · UNCA", "Inmediato"),
+        ]
+        st.dataframe(
+            pd.DataFrame(consequences, columns=[
+                "Dimensión", "Consecuencia a evaluar", "Acción sugerida",
+                "Actores posibles", "Horizonte orientativo"
+            ]),
+            use_container_width=True, hide_index=True
+        )
+
+        st.markdown("##### ¿Dónde intervenir primero? Señales calculadas desde la matriz")
+        # Comparación por ID para conservar diferencias aun cuando cambie el territorio.
+        b_rows = base_visible.set_index("id")
+        s_rows = scenario_visible.set_index("id")
+        common = b_rows.index.intersection(s_rows.index)
+        if len(common):
+            row_delta = pd.DataFrame({
+                "Macrosector": s_rows.loc[common, "macrosector"].astype(str).values,
+                "Actividad": s_rows.loc[common, "actividad"].astype(str).values,
+                "Territorio": s_rows.loc[common, "territorio_potencial"].astype(str).values,
+                "Δ demanda (US$ M)": (
+                    s_rows.loc[common, "demanda_anual_usd_demo"].to_numpy() -
+                    b_rows.loc[common, "demanda_anual_usd_demo"].to_numpy()
+                ) / 1e6,
+                "Δ captura local (US$ M)": (
+                    s_rows.loc[common, "captura_local_usd_demo"].to_numpy() -
+                    b_rows.loc[common, "captura_local_usd_demo"].to_numpy()
+                ) / 1e6,
+                "Δ gasto fuera (US$ M)": (
+                    s_rows.loc[common, "gasto_fuera_catamarca_usd_demo"].to_numpy() -
+                    b_rows.loc[common, "gasto_fuera_catamarca_usd_demo"].to_numpy()
+                ) / 1e6,
+                "Δ empleo potencial DEMO": (
+                    s_rows.loc[common, "empleo_local_potencial_demo"].to_numpy() -
+                    b_rows.loc[common, "empleo_local_potencial_demo"].to_numpy()
+                ),
+            })
+            by_sector = (row_delta.groupby("Macrosector", as_index=False)
+                         .sum(numeric_only=True)
+                         .sort_values("Δ gasto fuera (US$ M)", ascending=False))
+            st.markdown("**Sectores con mayor aumento del gasto fuera**")
+            st.dataframe(by_sector.head(10).style.format({
+                c: "{:+,.2f}" for c in by_sector.columns if c != "Macrosector"
+            }), use_container_width=True, hide_index=True)
+            st.markdown("**Actividades con mayor presión laboral adicional (DEMO)**")
+            st.dataframe(
+                row_delta.sort_values("Δ empleo potencial DEMO", ascending=False).head(10)
+                .style.format({c: "{:+,.2f}" for c in row_delta.columns if c.startswith("Δ ")}),
+                use_container_width=True, hide_index=True
+            )
+            st.caption("Las tablas muestran variaciones reales entre las filas comparables de Base y Escenario. "
+                       "La priorización definitiva requiere validar datos y coeficientes.")
+
+        st.markdown("##### Agenda de decisiones para los actores catamarqueños")
+        agenda = pd.DataFrame([
+            ["Minería y empresas", "Anticipar demanda por categoría y horizonte",
+             "Planes agregados de compras a 12–36 meses", "Información de compras validada"],
+            ["Producción y cámaras", "Elevar captura local donde sea factible",
+             "Diagnóstico de proveedores, brechas y programa de escalamiento", "Capacidad y certificaciones"],
+            ["Trabajo y Educación", "Preparar perfiles ante expansión",
+             "Mapa de ocupaciones, trayectos y prácticas", "Elasticidades y demanda ocupacional"],
+            ["UNCA e institutos", "Vincular formación e I+D con necesidades",
+             "Microcredenciales, laboratorios e investigación aplicada", "Brechas tecnológicas y educativas"],
+            ["Municipios e Infraestructura", "Prevenir cuellos de botella territoriales",
+             "Plan de infraestructura y servicios por territorio", "Capacidad de absorción local"],
+            ["Inversiones", "Atender brechas complejas y Aguas abajo",
+             "Prefactibilidad técnica y comercial", "Escala, CAPEX, energía y mercado"],
+        ], columns=["Actor", "Objetivo", "Decisión/acción a evaluar", "Evidencia pendiente"])
+        st.dataframe(agenda, use_container_width=True, hide_index=True)
+
+        st.markdown("##### Condiciones para convertir la DEMO en herramienta de decisión real")
+        st.markdown(
+            "- **Elasticidades laborales:** estimar con compras/captura local, empleo, productividad "
+            "y series históricas por actividad; separar empleo directo e indirecto.\n"
+            "- **Ponderadores de oportunidad y presión de política:** validar con especialistas "
+            "y objetivos explícitos de política; hacer sensibilidad.\n"
+            "- **Capacidad, complejidad y criticidad:** contrastar con proveedores, empresas "
+            "mineras, certificaciones, tecnología y tiempos de abastecimiento.\n"
+            "- **Capital humano:** calibrar matrices ocupacionales con empresas, UNCA, "
+            "educación técnica y estadísticas laborales.\n"
+            "- **Territorio:** incorporar infraestructura, logística, vivienda, energía "
+            "y capacidad institucional.\n"
+            "- **Aguas abajo:** realizar estudios de prefactibilidad, no inferir "
+            "industrialización automática.\n"
+            "- **Trazabilidad:** versionar datos, coeficientes, supuestos y fecha de cada escenario."
+        )
+
         st.markdown("### 6. Guardar el escenario para reutilizarlo")
         dl1, dl2 = st.columns(2)
         with dl1:
